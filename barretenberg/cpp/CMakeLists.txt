@@ -34,7 +34,7 @@ option(ENABLE_HEAVY_TESTS "Enable heavy tests when collecting coverage" OFF)
 option(ENABLE_STACKTRACES "Enable stack traces on assertion" OFF)
 option(ENABLE_TRACY "Enable low-medium overhead profiling for memory and performance with tracy" OFF)
 option(ENABLE_PIC "Builds with position independent code" OFF)
-option(SYNTAX_ONLY "only check syntax (-fsyntax-only)" OFF)
+option(SYNTAX_ONLY "only check syntax (-fsyntax-only)" ON)
 option(ENABLE_WASM_BENCH "Enable BB_BENCH benchmarking support in WASM builds (dev only, not for releases)" OFF)
 option(AVM "enable building of vm2 module and bb-avm" ON)
 
