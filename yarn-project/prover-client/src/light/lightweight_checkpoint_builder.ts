@@ -1,15 +1,22 @@
 import { SpongeBlob, computeBlobsHashFromBlobs, encodeCheckpointEndMarker, getBlobsPerL1Block } from '@aztec/blob-lib';
 import { NUMBER_OF_L1_L2_MESSAGES_PER_ROLLUP } from '@aztec/constants';
+import type { CheckpointNumber } from '@aztec/foundation/branded-types';
 import { padArrayEnd } from '@aztec/foundation/collection';
-import { Fr } from '@aztec/foundation/fields';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { createLogger } from '@aztec/foundation/log';
 import { L2BlockNew } from '@aztec/stdlib/block';
 import { Checkpoint } from '@aztec/stdlib/checkpoint';
 import type { MerkleTreeWriteOperations } from '@aztec/stdlib/interfaces/server';
 import { computeCheckpointOutHash, computeInHashFromL1ToL2Messages } from '@aztec/stdlib/messaging';
-import { CheckpointConstantData, CheckpointHeader, computeBlockHeadersHash } from '@aztec/stdlib/rollup';
+import { CheckpointHeader, computeBlockHeadersHash } from '@aztec/stdlib/rollup';
 import { AppendOnlyTreeSnapshot, MerkleTreeId } from '@aztec/stdlib/trees';
-import { ContentCommitment, type GlobalVariables, type ProcessedTx, StateReference } from '@aztec/stdlib/tx';
+import {
+  type CheckpointGlobalVariables,
+  ContentCommitment,
+  type GlobalVariables,
+  type ProcessedTx,
+  StateReference,
+} from '@aztec/stdlib/tx';
 
 import {
   buildHeaderAndBodyFromTxs,
@@ -20,8 +27,8 @@ import {
 /**
  * Builds a checkpoint and its header and the blocks in it from a set of processed tx without running any circuits.
  *
- * It updates the l1-to-l2 message tree when starting a new checkpoint, inserts the side effects to note hash,
- * nullifier, and public data trees, then updates the archive tree when a block is added.
+ * It updates the l1-to-l2 message tree when starting a new checkpoint, and then updates the archive tree when each block is added.
+ * Finally completes the checkpoint by computing its header.
  */
 export class LightweightCheckpointBuilder {
   private readonly logger = createLogger('lightweight-checkpoint-builder');
@@ -32,16 +39,18 @@ export class LightweightCheckpointBuilder {
   private blobFields: Fr[] = [];
 
   constructor(
-    private constants: CheckpointConstantData,
-    private l1ToL2Messages: Fr[],
-    private db: MerkleTreeWriteOperations,
+    public readonly checkpointNumber: CheckpointNumber,
+    public readonly constants: CheckpointGlobalVariables,
+    public readonly l1ToL2Messages: Fr[],
+    public readonly db: MerkleTreeWriteOperations,
   ) {
     this.spongeBlob = SpongeBlob.init();
-    this.logger.debug('Starting new checkpoint', { constants: constants.toInspect(), l1ToL2Messages });
+    this.logger.debug('Starting new checkpoint', { constants, l1ToL2Messages });
   }
 
   static async startNewCheckpoint(
-    constants: CheckpointConstantData,
+    checkpointNumber: CheckpointNumber,
+    constants: CheckpointGlobalVariables,
     l1ToL2Messages: Fr[],
     db: MerkleTreeWriteOperations,
   ): Promise<LightweightCheckpointBuilder> {
@@ -51,19 +60,49 @@ export class LightweightCheckpointBuilder {
       padArrayEnd<Fr, number>(l1ToL2Messages, Fr.ZERO, NUMBER_OF_L1_L2_MESSAGES_PER_ROLLUP),
     );
 
-    return new LightweightCheckpointBuilder(constants, l1ToL2Messages, db);
+    return new LightweightCheckpointBuilder(checkpointNumber, constants, l1ToL2Messages, db);
   }
 
-  async addBlock(globalVariables: GlobalVariables, endState: StateReference, txs: ProcessedTx[]): Promise<L2BlockNew> {
+  /**
+   * Adds a new block to the checkpoint. The tx effects must have already been inserted into the db if
+   * this is called after tx processing, if that's not the case, then set `insertTxsEffects` to true.
+   */
+  public async addBlock(
+    globalVariables: GlobalVariables,
+    txs: ProcessedTx[],
+    opts: { insertTxsEffects?: boolean; expectedEndState?: StateReference } = {},
+  ): Promise<L2BlockNew> {
     const isFirstBlock = this.blocks.length === 0;
+
+    // Empty blocks are only allowed as the first block in a checkpoint
+    if (!isFirstBlock && txs.length === 0) {
+      throw new Error('Cannot add empty block that is not the first block in the checkpoint.');
+    }
+
     if (isFirstBlock) {
       this.lastArchives.push(await getTreeSnapshot(MerkleTreeId.ARCHIVE, this.db));
     }
 
     const lastArchive = this.lastArchives.at(-1)!;
 
-    for (const tx of txs) {
-      await insertSideEffects(tx, this.db);
+    if (opts.insertTxsEffects) {
+      this.logger.debug(
+        `Inserting side effects for ${txs.length} txs for block ${globalVariables.blockNumber} into db`,
+        { txs: txs.map(tx => tx.hash.toString()) },
+      );
+      for (const tx of txs) {
+        await insertSideEffects(tx, this.db);
+      }
+    }
+
+    const endState = await this.db.getStateReference();
+    if (opts.expectedEndState && !endState.equals(opts.expectedEndState)) {
+      this.logger.error('End state after processing txs does not match expected end state', {
+        globalVariables: globalVariables.toInspect(),
+        expectedEndState: opts.expectedEndState.toInspect(),
+        actualEndState: endState.toInspect(),
+      });
+      throw new Error(`End state does not match expected end state when building block ${globalVariables.blockNumber}`);
     }
 
     const { header, body, blockBlobFields } = await buildHeaderAndBodyFromTxs(
@@ -75,11 +114,14 @@ export class LightweightCheckpointBuilder {
       isFirstBlock,
     );
 
+    header.state.validate();
+
     await this.db.updateArchive(header);
     const newArchive = await getTreeSnapshot(MerkleTreeId.ARCHIVE, this.db);
     this.lastArchives.push(newArchive);
 
-    const block = new L2BlockNew(newArchive, header, body);
+    const indexWithinCheckpoint = this.blocks.length;
+    const block = new L2BlockNew(newArchive, header, body, this.checkpointNumber, indexWithinCheckpoint);
     this.blocks.push(block);
 
     await this.spongeBlob.absorb(blockBlobFields);
@@ -98,7 +140,7 @@ export class LightweightCheckpointBuilder {
 
   async completeCheckpoint(): Promise<Checkpoint> {
     if (!this.blocks.length) {
-      throw new Error('No blocks added to checkpoint.');
+      throw new Error('Cannot complete a checkpoint with no blocks');
     }
 
     const numBlobFields = this.blobFields.length + 1; // +1 for the checkpoint end marker.
@@ -117,8 +159,9 @@ export class LightweightCheckpointBuilder {
 
     const outHash = computeCheckpointOutHash(blocks.map(block => block.body.txEffects.map(tx => tx.l2ToL1Msgs)));
 
-    const constants = this.constants!;
+    const { slotNumber, coinbase, feeRecipient, gasFees } = this.constants;
 
+    // TODO(palla/mbps): Should we source this from the constants instead?
     // timestamp of a checkpoint is the timestamp of the last block in the checkpoint.
     const timestamp = blocks[blocks.length - 1].timestamp;
 
@@ -126,16 +169,30 @@ export class LightweightCheckpointBuilder {
 
     const header = CheckpointHeader.from({
       lastArchiveRoot: this.lastArchives[0].root,
-      blockHeadersHash,
       contentCommitment: new ContentCommitment(blobsHash, inHash, outHash),
-      slotNumber: constants.slotNumber,
+      blockHeadersHash,
+      slotNumber,
       timestamp,
-      coinbase: constants.coinbase,
-      feeRecipient: constants.feeRecipient,
-      gasFees: constants.gasFees,
+      coinbase,
+      feeRecipient,
+      gasFees,
       totalManaUsed,
     });
 
-    return new Checkpoint(newArchive, header, blocks);
+    return new Checkpoint(newArchive, header, blocks, this.checkpointNumber);
+  }
+
+  clone() {
+    const clone = new LightweightCheckpointBuilder(
+      this.checkpointNumber,
+      this.constants,
+      [...this.l1ToL2Messages],
+      this.db,
+    );
+    clone.lastArchives = [...this.lastArchives];
+    clone.spongeBlob = this.spongeBlob.clone();
+    clone.blocks = [...this.blocks];
+    clone.blobFields = [...this.blobFields];
+    return clone;
   }
 }

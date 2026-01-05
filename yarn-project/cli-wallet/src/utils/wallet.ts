@@ -9,16 +9,16 @@ import {
   getGasLimits,
 } from '@aztec/aztec.js/contracts';
 import type { AztecNode } from '@aztec/aztec.js/node';
-import { UniqueNote } from '@aztec/aztec.js/note';
 import { AccountManager, type Aliased, type SimulateOptions } from '@aztec/aztec.js/wallet';
 import type { DefaultAccountEntrypointOptions } from '@aztec/entrypoints/account';
-import { Fr } from '@aztec/foundation/fields';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import type { LogFn } from '@aztec/foundation/log';
 import type { PXEConfig } from '@aztec/pxe/config';
 import type { PXE } from '@aztec/pxe/server';
 import { createPXE, getPXEConfig } from '@aztec/pxe/server';
 import { AztecAddress } from '@aztec/stdlib/aztec-address';
 import { deriveSigningKey } from '@aztec/stdlib/keys';
+import { NoteDao } from '@aztec/stdlib/note';
 import type { NotesFilter } from '@aztec/stdlib/note';
 import type { TxProvingResult, TxSimulationResult } from '@aztec/stdlib/tx';
 import { ExecutionPayload, mergeExecutionPayloads } from '@aztec/stdlib/tx';
@@ -260,7 +260,7 @@ export class CLIWallet extends BaseWallet {
 
   // Exposed because of the `aztec-wallet get-tx` command. It has been decided that it's fine to keep around because
   // this is just a CLI wallet.
-  getNotes(filter: NotesFilter): Promise<UniqueNote[]> {
-    return this.pxe.getNotes(filter);
+  getNotes(filter: NotesFilter): Promise<NoteDao[]> {
+    return this.pxe.debug.getNotes(filter);
   }
 }

@@ -5,7 +5,6 @@
 // =====================
 
 #pragma once
-#include "barretenberg/serialize/msgpack.hpp"
 #include "barretenberg/stdlib/primitives/field/field.hpp"
 #include "barretenberg/stdlib/primitives/group/cycle_group.hpp"
 
@@ -15,7 +14,7 @@ template <typename FF> struct WitnessOrConstant {
     uint32_t index;
     FF value;
     bool is_constant;
-    MSGPACK_FIELDS(index, value, is_constant);
+
     friend bool operator==(WitnessOrConstant const& lhs, WitnessOrConstant const& rhs) = default;
     static WitnessOrConstant from_index(uint32_t index)
     {
@@ -50,7 +49,6 @@ template <typename Builder>
 bb::stdlib::cycle_group<Builder> to_grumpkin_point(const WitnessOrConstant<typename Builder::FF>& input_x,
                                                    const WitnessOrConstant<typename Builder::FF>& input_y,
                                                    const WitnessOrConstant<typename Builder::FF>& input_infinite,
-                                                   bool has_valid_witness_assignments,
                                                    const bb::stdlib::bool_t<Builder>& predicate,
                                                    Builder& builder);
 
@@ -58,7 +56,6 @@ template <typename Builder>
 typename bb::stdlib::cycle_group<Builder>::cycle_scalar to_grumpkin_scalar(
     const WitnessOrConstant<typename Builder::FF>& scalar_lo,
     const WitnessOrConstant<typename Builder::FF>& scalar_hi,
-    bool has_valid_witness_assignments,
     const bb::stdlib::bool_t<Builder>& predicate,
     Builder& builder);
 

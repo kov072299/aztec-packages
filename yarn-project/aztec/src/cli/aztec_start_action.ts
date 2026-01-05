@@ -33,7 +33,6 @@ export async function aztecStart(options: any, userLog: LogFn, debugLogger: Logg
       {
         l1Mnemonic: localNetwork.l1Mnemonic,
         l1RpcUrls: options.l1RpcUrls,
-        deployAztecContractsSalt: localNetwork.deployAztecContractsSalt,
         testAccounts: localNetwork.testAccounts,
         realProofs: false,
       },
@@ -53,9 +52,6 @@ export async function aztecStart(options: any, userLog: LogFn, debugLogger: Logg
     } else if (options.proverNode) {
       const { startProverNode } = await import('./cmds/start_prover_node.js');
       ({ config } = await startProverNode(options, signalHandlers, services, userLog));
-    } else if (options.blobSink) {
-      const { startBlobSink } = await import('./cmds/start_blob_sink.js');
-      await startBlobSink(options, signalHandlers, userLog);
     } else if (options.archiver) {
       const { startArchiver } = await import('./cmds/start_archiver.js');
       ({ config } = await startArchiver(options, signalHandlers, services));

@@ -10,8 +10,9 @@ import {
   NUMBER_OF_L1_L2_MESSAGES_PER_ROLLUP,
   NUM_BASE_PARITY_PER_ROOT_PARITY,
 } from '@aztec/constants';
+import { BlockNumber } from '@aztec/foundation/branded-types';
 import { padArrayEnd, times, timesParallel } from '@aztec/foundation/collection';
-import { Fr } from '@aztec/foundation/fields';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { type Tuple, assertLength } from '@aztec/foundation/serialize';
 import { getVkData } from '@aztec/noir-protocol-circuits-types/server/vks';
 import { getVKTreeRoot } from '@aztec/noir-protocol-circuits-types/vk-tree';
@@ -104,7 +105,7 @@ describe('LightBlockBuilder', () => {
     globalVariables = GlobalVariables.from({
       ...initialHeader.globalVariables,
       gasFees,
-      blockNumber: initialHeader.globalVariables.blockNumber + 1,
+      blockNumber: BlockNumber(initialHeader.globalVariables.blockNumber + 1),
       timestamp: initialHeader.globalVariables.timestamp + 1n,
     });
   });
@@ -124,7 +125,7 @@ describe('LightBlockBuilder', () => {
 
     const expectedHeader = await buildExpectedHeader(txs, l1ToL2Messages);
 
-    expect(header).toEqual(expectedHeader);
+    expect(header.equals(expectedHeader)).toBe(true);
   });
 
   it('builds a 3 tx header', async () => {
@@ -136,7 +137,7 @@ describe('LightBlockBuilder', () => {
       return Promise.resolve([merge, rollupOutputs[2]]);
     });
 
-    expect(header).toEqual(expectedHeader);
+    expect(header.equals(expectedHeader)).toBe(true);
   });
 
   it('builds a 4 tx header', async () => {
@@ -149,7 +150,7 @@ describe('LightBlockBuilder', () => {
       return [mergeLeft, mergeRight];
     });
 
-    expect(header).toEqual(expectedHeader);
+    expect(header.equals(expectedHeader)).toBe(true);
   });
 
   it('builds a 4 tx header with no l1 to l2 messages', async () => {
@@ -163,7 +164,7 @@ describe('LightBlockBuilder', () => {
       return [mergeLeft, mergeRight];
     });
 
-    expect(header).toEqual(expectedHeader);
+    expect(header.equals(expectedHeader)).toBe(true);
   });
 
   it('builds a 5 tx header', async () => {
@@ -177,7 +178,7 @@ describe('LightBlockBuilder', () => {
       return [merge20, rollupOutputs[4]];
     });
 
-    expect(header).toEqual(expectedHeader);
+    expect(header.equals(expectedHeader)).toBe(true);
   });
 
   it('builds a single tx header', async () => {
@@ -186,7 +187,7 @@ describe('LightBlockBuilder', () => {
 
     const expectedHeader = await buildExpectedHeader(txs, l1ToL2Messages);
 
-    expect(header).toEqual(expectedHeader);
+    expect(header.equals(expectedHeader)).toBe(true);
   });
 
   it('builds an empty header', async () => {
@@ -195,7 +196,7 @@ describe('LightBlockBuilder', () => {
 
     const expectedHeader = await buildExpectedHeader(txs, l1ToL2Messages);
 
-    expect(header).toEqual(expectedHeader);
+    expect(header.equals(expectedHeader)).toBe(true);
   });
 
   const makeTx = (i: number) => {

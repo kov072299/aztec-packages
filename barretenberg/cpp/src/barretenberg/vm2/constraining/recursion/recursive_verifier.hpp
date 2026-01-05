@@ -24,14 +24,12 @@ class AvmRecursiveVerifier {
     using StdlibProof = stdlib::Proof<Builder>;
 
   public:
-    explicit AvmRecursiveVerifier(Builder& builder, const std::shared_ptr<VerificationKey>& vkey);
+    explicit AvmRecursiveVerifier(Builder& builder);
 
     [[nodiscard("IPA claim and Pairing points should be accumulated")]] PairingPoints verify_proof(
         const HonkProof& proof, const std::vector<std::vector<fr>>& public_inputs_vec_nt);
     [[nodiscard("IPA claim and Pairing points should be accumulated")]] PairingPoints verify_proof(
-        const StdlibProof& stdlib_proof_with_pi_flag, // TODO(#14234)[Unconditional PIs validation]: rename
-                                                      // stdlib_proof_with_pi_flag to stdlib_proof
-        const std::vector<std::vector<typename Flavor::FF>>& public_inputs);
+        const StdlibProof& stdlib_proof, const std::vector<std::vector<typename Flavor::FF>>& public_inputs);
 
     Builder& builder;
     std::shared_ptr<VerificationKey> key;

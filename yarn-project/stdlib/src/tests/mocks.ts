@@ -7,20 +7,24 @@ import {
   MAX_TOTAL_PUBLIC_DATA_UPDATE_REQUESTS_PER_TX,
 } from '@aztec/constants';
 import { makeTuple } from '@aztec/foundation/array';
+import { BlockNumber, CheckpointNumber, SlotNumber } from '@aztec/foundation/branded-types';
 import { Buffer32 } from '@aztec/foundation/buffer';
 import { padArrayEnd, times } from '@aztec/foundation/collection';
-import { Secp256k1Signer, randomBytes } from '@aztec/foundation/crypto';
-import { Fr } from '@aztec/foundation/fields';
+import { randomBytes } from '@aztec/foundation/crypto/random';
+import { Secp256k1Signer } from '@aztec/foundation/crypto/secp256k1-signer';
+import { Fr } from '@aztec/foundation/curves/bn254';
 
 import type { ContractArtifact } from '../abi/abi.js';
+import { PublicTxEffect } from '../avm/avm.js';
 import { AvmCircuitPublicInputs } from '../avm/avm_circuit_public_inputs.js';
 import { PublicDataWrite } from '../avm/public_data_write.js';
 import { RevertCode } from '../avm/revert_code.js';
 import { AztecAddress } from '../aztec-address/index.js';
-import { CommitteeAttestation, L1PublishedData, L2BlockHeader } from '../block/index.js';
+import { CommitteeAttestation, L2BlockHeader, L2BlockNew, PublishedL2Block } from '../block/index.js';
 import { L2Block } from '../block/l2_block.js';
 import type { CommitteeAttestationsAndSigners } from '../block/proposal/attestations_and_signers.js';
-import { PublishedL2Block } from '../block/published_l2_block.js';
+import { Checkpoint } from '../checkpoint/checkpoint.js';
+import { L1PublishedData } from '../checkpoint/published_checkpoint.js';
 import { computeContractAddressFromInstance } from '../contract/contract_address.js';
 import { getContractClassFromArtifact } from '../contract/contract_class.js';
 import { SerializableContractInstance } from '../contract/contract_instance.js';
@@ -40,8 +44,7 @@ import {
 import { PrivateToAvmAccumulatedData } from '../kernel/private_to_avm_accumulated_data.js';
 import { PrivateToPublicAccumulatedDataBuilder } from '../kernel/private_to_public_accumulated_data_builder.js';
 import { PublicCallRequestArrayLengths } from '../kernel/public_call_request.js';
-import { Note } from '../note/note.js';
-import { UniqueNote } from '../note/unique_note.js';
+import { computeInHashFromL1ToL2Messages } from '../messaging/in_hash.js';
 import { BlockAttestation } from '../p2p/block_attestation.js';
 import { BlockProposal } from '../p2p/block_proposal.js';
 import { ConsensusPayload } from '../p2p/consensus_payload.js';
@@ -56,7 +59,6 @@ import {
   PrivateCallExecutionResult,
   PrivateExecutionResult,
   ProtocolContracts,
-  StateReference,
   Tx,
   TxConstantData,
   makeProcessedTxFromPrivateOnlyTx,
@@ -69,9 +71,9 @@ import { TxHash } from '../tx/tx_hash.js';
 import {
   makeAvmCircuitInputs,
   makeAztecAddress,
+  makeBlockHeader,
   makeGas,
   makeGlobalVariables,
-  makeHeader,
   makeL2BlockHeader,
   makePrivateToPublicAccumulatedData,
   makePrivateToRollupAccumulatedData,
@@ -81,24 +83,6 @@ import {
 } from './factories.js';
 
 export const randomTxHash = (): TxHash => TxHash.random();
-
-export const randomUniqueNote = async ({
-  note = Note.random(),
-  recipient = undefined,
-  contractAddress = undefined,
-  txHash = randomTxHash(),
-  storageSlot = Fr.random(),
-  noteNonce = Fr.random(),
-}: Partial<UniqueNote> = {}) => {
-  return new UniqueNote(
-    note,
-    recipient ?? (await AztecAddress.random()),
-    contractAddress ?? (await AztecAddress.random()),
-    storageSlot,
-    txHash,
-    noteNonce,
-  );
-};
 
 export const mockTx = async (
   seed = 1,
@@ -231,7 +215,7 @@ export async function mockProcessedTx({
   privateOnly?: boolean;
 } & Parameters<typeof mockTx>[1] = {}) {
   seed *= 0x1000; // Avoid clashing with the previous mock values if seed only increases by 1.
-  anchorBlockHeader ??= db?.getInitialHeader() ?? makeHeader(seed);
+  anchorBlockHeader ??= db?.getInitialHeader() ?? makeBlockHeader(seed);
   feePayer ??= makeAztecAddress(seed + 0x100);
   feePaymentPublicDataWrite ??= makePublicDataWrite(seed + 0x200);
 
@@ -338,12 +322,24 @@ export async function mockProcessedTx({
     } satisfies GasUsed;
 
     await tx.recomputeHash();
+
+    const publicTxEffect = new PublicTxEffect(
+      avmOutput.transactionFee,
+      avmOutput.accumulatedData.noteHashes.filter(h => !h.isZero()),
+      avmOutput.accumulatedData.nullifiers.filter(h => !h.isZero()),
+      avmOutput.accumulatedData.l2ToL1Msgs.filter(h => !h.isEmpty()),
+      avmOutput.accumulatedData.publicLogs.toLogs(),
+      avmOutput.accumulatedData.publicDataWrites.filter(h => !h.isEmpty()),
+    );
+
     return makeProcessedTxFromTxWithPublicCalls(
       tx,
+      globalVariables,
       {
         type: ProvingRequestType.PUBLIC_VM,
         inputs: avmCircuitInputs,
       },
+      publicTxEffect,
       gasUsed,
       RevertCode.OK,
       undefined /* revertReason */,
@@ -387,6 +383,67 @@ export const mockSimulatedTx = async (seed = 1) => {
   return new TxSimulationResult(privateExecutionResult, tx.data, output);
 };
 
+export function mockL1ToL2Messages(numL1ToL2Messages: number): Fr[] {
+  return Array.from({ length: numL1ToL2Messages }, () => Fr.random());
+}
+
+export async function mockCheckpointAndMessages(
+  checkpointNumber: CheckpointNumber,
+  {
+    startBlockNumber = BlockNumber(1),
+    numBlocks = 1,
+    numTxsPerBlock = 1,
+    numL1ToL2Messages = 1,
+    makeBlockOptions = () => ({}),
+    previousArchive,
+    ...options
+  }: {
+    startBlockNumber?: BlockNumber;
+    numBlocks?: number;
+    numTxsPerBlock?: number;
+    numL1ToL2Messages?: number;
+    makeBlockOptions?: (blockNumber: BlockNumber) => Partial<Parameters<typeof L2BlockNew.random>[1]>;
+    previousArchive?: AppendOnlyTreeSnapshot;
+  } & Partial<Parameters<typeof Checkpoint.random>[1]> &
+    Partial<Parameters<typeof L2BlockNew.random>[1]> = {},
+) {
+  const slotNumber = options.slotNumber ?? SlotNumber(checkpointNumber * 10);
+  const blocksAndMessages = [];
+  // Track the previous block's archive to ensure consecutive blocks have consistent archive roots.
+  // The current block's header.lastArchive must equal the previous block's archive.
+  let lastArchive: AppendOnlyTreeSnapshot | undefined = previousArchive;
+  for (let i = 0; i < numBlocks; i++) {
+    const blockNumber = BlockNumber(startBlockNumber + i);
+    const { block, messages } = {
+      block: await L2BlockNew.random(blockNumber, {
+        checkpointNumber,
+        indexWithinCheckpoint: i,
+        txsPerBlock: numTxsPerBlock,
+        slotNumber,
+        ...options,
+        ...makeBlockOptions(blockNumber),
+        ...(lastArchive ? { lastArchive } : {}),
+      }),
+      messages: mockL1ToL2Messages(numL1ToL2Messages),
+    };
+    // Update lastArchive for the next block
+    lastArchive = block.archive;
+    blocksAndMessages.push({ block, messages });
+  }
+
+  const messages = blocksAndMessages[0].messages;
+  const inHash = computeInHashFromL1ToL2Messages(messages);
+  const checkpoint = await Checkpoint.random(checkpointNumber, { numBlocks: 0, slotNumber, inHash, ...options });
+  checkpoint.blocks = blocksAndMessages.map(({ block }) => block);
+  // Set the checkpoint's archive to match the last block's archive for proper chaining.
+  // When the archiver reconstructs checkpoints from L1, it uses the checkpoint's archive root
+  // from the L1 event to set the last block's archive. Without this, the archive chain breaks.
+  checkpoint.archive = lastArchive!;
+
+  // Return lastArchive so callers can chain it across multiple checkpoints
+  return { checkpoint, messages, lastArchive };
+}
+
 export const randomContractArtifact = (): ContractArtifact => ({
   name: randomBytes(4).toString('hex'),
   functions: [],
@@ -426,7 +483,6 @@ export interface MakeConsensusPayloadOptions {
   proposerSigner?: Secp256k1Signer;
   header?: L2BlockHeader;
   archive?: Fr;
-  stateReference?: StateReference;
   txHashes?: TxHash[];
   txs?: Tx[];
 }
@@ -436,12 +492,11 @@ const makeAndSignConsensusPayload = (
   options?: MakeConsensusPayloadOptions,
 ) => {
   const header = options?.header ?? makeL2BlockHeader(1);
-  const { signer = Secp256k1Signer.random(), archive = Fr.random(), stateReference = header.state } = options ?? {};
+  const { signer = Secp256k1Signer.random(), archive = Fr.random() } = options ?? {};
 
   const payload = ConsensusPayload.fromFields({
     header: header.toCheckpointHeader(),
     archive,
-    stateReference,
   });
 
   const hash = getHashedSignaturePayloadEthSignedMessage(payload, domainSeparator);
@@ -468,31 +523,32 @@ export const makeBlockProposal = (options?: MakeConsensusPayloadOptions): BlockP
 };
 
 // TODO(https://github.com/AztecProtocol/aztec-packages/issues/8028)
-export const makeBlockAttestation = (options?: MakeConsensusPayloadOptions): BlockAttestation => {
-  const header = options?.header ?? makeL2BlockHeader(1);
-  const {
-    signer,
-    attesterSigner = signer ?? Secp256k1Signer.random(),
-    proposerSigner = signer ?? Secp256k1Signer.random(),
-    archive = Fr.random(),
-    stateReference = header.state,
-  } = options ?? {};
+export const makeBlockAttestation = (options: MakeConsensusPayloadOptions = {}): BlockAttestation => {
+  const header = options.header ?? makeL2BlockHeader(1);
+  const { signer, attesterSigner = signer, proposerSigner = signer, archive = Fr.random() } = options;
 
   const payload = ConsensusPayload.fromFields({
     header: header.toCheckpointHeader(),
     archive,
-    stateReference,
   });
 
-  // Sign as attester
-  const attestationHash = getHashedSignaturePayloadEthSignedMessage(payload, SignatureDomainSeparator.blockAttestation);
-  const attestationSignature = attesterSigner.sign(attestationHash);
+  return makeBlockAttestationFromPayload(payload, attesterSigner, proposerSigner);
+};
 
-  // Sign as proposer
-  const proposalHash = getHashedSignaturePayloadEthSignedMessage(payload, SignatureDomainSeparator.blockProposal);
-  const proposerSignature = proposerSigner.sign(proposalHash);
+export const makeAttestationFromCheckpoint = (
+  checkpoint: Checkpoint,
+  attesterSigner?: Secp256k1Signer,
+  proposerSigner?: Secp256k1Signer,
+): BlockAttestation => {
+  const header = checkpoint.header;
+  const archive = checkpoint.archive.root;
 
-  return new BlockAttestation(payload, attestationSignature, proposerSignature);
+  const payload = ConsensusPayload.fromFields({
+    header,
+    archive,
+  });
+
+  return makeBlockAttestationFromPayload(payload, attesterSigner, proposerSigner);
 };
 
 export const makeBlockAttestationFromBlock = (
@@ -502,14 +558,20 @@ export const makeBlockAttestationFromBlock = (
 ): BlockAttestation => {
   const header = block.header;
   const archive = block.archive.root;
-  const stateReference = block.header.state;
 
   const payload = ConsensusPayload.fromFields({
     header: header.toCheckpointHeader(),
     archive,
-    stateReference,
   });
 
+  return makeBlockAttestationFromPayload(payload, attesterSigner, proposerSigner);
+};
+
+export const makeBlockAttestationFromPayload = (
+  payload: ConsensusPayload,
+  attesterSigner?: Secp256k1Signer,
+  proposerSigner?: Secp256k1Signer,
+): BlockAttestation => {
   // Sign as attester
   const attestationHash = getHashedSignaturePayloadEthSignedMessage(payload, SignatureDomainSeparator.blockAttestation);
   const attestationSigner = attesterSigner ?? Secp256k1Signer.random();
@@ -527,7 +589,7 @@ export async function randomPublishedL2Block(
   l2BlockNumber: number,
   opts: { signers?: Secp256k1Signer[] } = {},
 ): Promise<PublishedL2Block> {
-  const block = await L2Block.random(l2BlockNumber);
+  const block = await L2Block.random(BlockNumber(l2BlockNumber));
   const l1 = L1PublishedData.fromFields({
     blockNumber: BigInt(block.number),
     timestamp: block.header.globalVariables.timestamp,

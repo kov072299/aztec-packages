@@ -25,7 +25,7 @@
       "path": "../bb-prover"
     },
     {
-      "path": "../blob-sink"
+      "path": "../blob-client"
     },
     {
       "path": "../bot"
@@ -80,6 +80,9 @@
     },
     {
       "path": "../pxe"
+    },
+    {
+      "path": "../sequencer-client"
     },
     {
       "path": "../stdlib"

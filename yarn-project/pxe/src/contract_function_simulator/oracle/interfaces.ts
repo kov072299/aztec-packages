@@ -1,15 +1,16 @@
 import type { L1_TO_L2_MSG_TREE_HEIGHT } from '@aztec/constants';
-import { Fr, Point } from '@aztec/foundation/fields';
+import type { BlockNumber } from '@aztec/foundation/branded-types';
+import { Fr } from '@aztec/foundation/curves/bn254';
+import { Point } from '@aztec/foundation/curves/grumpkin';
 import type { FunctionSelector, NoteSelector } from '@aztec/stdlib/abi';
 import type { AztecAddress } from '@aztec/stdlib/aztec-address';
 import type { CompleteAddress, ContractInstance } from '@aztec/stdlib/contract';
 import type { KeyValidationRequest } from '@aztec/stdlib/kernel';
-import type { ContractClassLog } from '@aztec/stdlib/logs';
+import type { ContractClassLog, Tag } from '@aztec/stdlib/logs';
 import type { Note, NoteStatus } from '@aztec/stdlib/note';
 import { type MerkleTreeId, type NullifierMembershipWitness, PublicDataWitness } from '@aztec/stdlib/trees';
 import type { BlockHeader } from '@aztec/stdlib/tx';
 
-import type { Tag } from '../../tagging/tag.js';
 import type { UtilityContext } from '../noir-structs/utility_context.js';
 import type { MessageLoadOracleInputs } from './message_load_oracle_inputs.js';
 
@@ -21,8 +22,12 @@ export interface NoteData {
   note: Note;
   /** The address of the contract that owns the note. */
   contractAddress: AztecAddress;
+  /** The owner of the note. */
+  owner: AztecAddress;
   /** The storage slot of the note. */
   storageSlot: Fr;
+  /** The randomness injected to the note */
+  randomness: Fr;
   /** The nonce injected into the note hash preimage by kernels. */
   noteNonce: Fr;
   /** A hash of the note as it gets stored in the note hash tree. */
@@ -57,23 +62,24 @@ export interface IMiscOracle {
 export interface IUtilityExecutionOracle {
   isUtility: true;
 
-  utilityGetUtilityContext(): Promise<UtilityContext>;
+  utilityGetUtilityContext(): UtilityContext;
   utilityGetKeyValidationRequest(pkMHash: Fr): Promise<KeyValidationRequest>;
   utilityGetContractInstance(address: AztecAddress): Promise<ContractInstance>;
-  utilityGetMembershipWitness(blockNumber: number, treeId: MerkleTreeId, leafValue: Fr): Promise<Fr[] | undefined>;
+  utilityGetMembershipWitness(blockNumber: BlockNumber, treeId: MerkleTreeId, leafValue: Fr): Promise<Fr[] | undefined>;
   utilityGetNullifierMembershipWitness(
-    blockNumber: number,
+    blockNumber: BlockNumber,
     nullifier: Fr,
   ): Promise<NullifierMembershipWitness | undefined>;
-  utilityGetPublicDataWitness(blockNumber: number, leafSlot: Fr): Promise<PublicDataWitness | undefined>;
+  utilityGetPublicDataWitness(blockNumber: BlockNumber, leafSlot: Fr): Promise<PublicDataWitness | undefined>;
   utilityGetLowNullifierMembershipWitness(
-    blockNumber: number,
+    blockNumber: BlockNumber,
     nullifier: Fr,
   ): Promise<NullifierMembershipWitness | undefined>;
-  utilityGetBlockHeader(blockNumber: number): Promise<BlockHeader | undefined>;
+  utilityGetBlockHeader(blockNumber: BlockNumber): Promise<BlockHeader | undefined>;
   utilityGetPublicKeysAndPartialAddress(account: AztecAddress): Promise<CompleteAddress>;
   utilityGetAuthWitness(messageHash: Fr): Promise<Fr[] | undefined>;
   utilityGetNotes(
+    owner: AztecAddress | undefined,
     storageSlot: Fr,
     numSelects: number,
     selectByIndexes: number[],
@@ -98,7 +104,7 @@ export interface IUtilityExecutionOracle {
   utilityStorageRead(
     contractAddress: AztecAddress,
     startStorageSlot: Fr,
-    blockNumber: number,
+    blockNumber: BlockNumber,
     numberOfElements: number,
   ): Promise<Fr[]>;
   utilityFetchTaggedLogs(pendingTaggedLogArrayBaseSlot: Fr): Promise<void>;
@@ -129,7 +135,15 @@ export interface IPrivateExecutionOracle {
 
   privateStoreInExecutionCache(values: Fr[], hash: Fr): void;
   privateLoadFromExecutionCache(hash: Fr): Promise<Fr[]>;
-  privateNotifyCreatedNote(storageSlot: Fr, noteTypeId: NoteSelector, note: Fr[], noteHash: Fr, counter: number): void;
+  privateNotifyCreatedNote(
+    owner: AztecAddress,
+    storageSlot: Fr,
+    randomness: Fr,
+    noteTypeId: NoteSelector,
+    note: Fr[],
+    noteHash: Fr,
+    counter: number,
+  ): void;
   privateNotifyNullifiedNote(innerNullifier: Fr, noteHash: Fr, counter: number): Promise<void>;
   privateNotifyCreatedNullifier(innerNullifier: Fr): Promise<void>;
   privateNotifyCreatedContractClassLog(log: ContractClassLog, counter: number): void;

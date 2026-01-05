@@ -27,11 +27,32 @@
 #include "barretenberg/vm2/common/memory_types.hpp"
 #include "barretenberg/vm2/simulation/lib/serialization.hpp"
 
+enum class TerminatorType {
+    RETURN,
+    REVERT,
+    JUMP,
+    JUMP_IF,
+    NONE,
+};
+
 class ProgramBlock {
   private:
     MemoryManager memory_manager;
     std::vector<bb::avm2::simulation::Instruction> instructions;
+
+    /// @brief the offset index of the condition variable (for JUMP_IF)
     uint16_t condition_offset_index = 0;
+
+    // At first we insert INTERNALCALL instruction with 0 offset, because we don't know the resulting block offsets
+    // when we insert instruction. On the step 3 of build bytecode we calculate the actual offsets, which will be used
+    // for step 4 to patch the INTERNALCALL instruction with the actual offset.
+    std::map<size_t, ProgramBlock*> internal_call_instruction_indicies_to_patch;
+
+    /// @brief preprocess the memory addresses
+    /// Sets M[0] = base_offset for Relative/IndirectRelative modes
+    /// Sets M[pointer_address] = pointer_value for Indirect/IndirectRelative modes
+    void preprocess_memory_addresses(ResolvedAddress resolved_address);
+    void record_result_tag_from_param_tags(std::initializer_list<ParamRef> params, ResolvedAddress result_address);
 
     void process_add_8_instruction(ADD_8_Instruction instruction);
     void process_sub_8_instruction(SUB_8_Instruction instruction);
@@ -78,11 +99,29 @@ class ProgramBlock {
     void process_nullifierexists_instruction(NULLIFIEREXISTS_Instruction instruction);
     void process_emitnotehash_instruction(EMITNOTEHASH_Instruction instruction);
     void process_notehashexists_instruction(NOTEHASHEXISTS_Instruction instruction);
+    void process_calldatacopy_instruction(CALLDATACOPY_Instruction instruction);
+    void process_sendl2tol1msg_instruction(SENDL2TOL1MSG_Instruction instruction);
+    void process_emitunencryptedlog_instruction(EMITUNENCRYPTEDLOG_Instruction instruction);
+    void process_call_instruction(CALL_Instruction instruction);
+    void process_returndatasize_with_returndatacopy_instruction(
+        RETURNDATASIZE_WITH_RETURNDATACOPY_Instruction instruction);
+    void process_getcontractinstance_instruction(GETCONTRACTINSTANCE_Instruction instruction);
+    void process_successcopy_instruction(SUCCESSCOPY_Instruction instruction);
+    void process_ecadd_instruction(ECADD_Instruction instruction);
+    void process_poseidon2perm_instruction(POSEIDON2PERM_Instruction instruction);
+    void process_keccakf1600_instruction(KECCAKF1600_Instruction instruction);
+    void process_sha256compression_instruction(SHA256COMPRESSION_Instruction instruction);
+    void process_l1tol2msgexists_instruction(L1TOL2MSGEXISTS_Instruction instruction);
+    void process_toradixbe_instruction(TORADIXBE_Instruction instruction);
 
   public:
     std::vector<ProgramBlock*> successors;
     std::vector<ProgramBlock*> predecessors;
-    bool terminated = false;
+
+    /// @brief the block that called this block by INTERNALCALL
+    /// This field is copied to predecessors on every CFG instructions
+    ProgramBlock* caller = nullptr;
+    TerminatorType terminator_type = TerminatorType::NONE;
     int offset = -1;
 
     ProgramBlock() = default;
@@ -95,26 +134,41 @@ class ProgramBlock {
 
     /// @brief finalize the program block with a return instruction
     /// Tries to find memory address with the given `return_value_tag`, if there are no such address (zero variables of
-    /// such tag are stored), it sets the return address to 0
+    /// such tag are stored), it sets the return address to 0. Sets the terminator type to RETURN.
+    /// @note if the block has caller, it inserts INTERNALRETURN only
     void finalize_with_return(uint8_t return_size,
                               MemoryTagWrapper return_value_tag,
                               uint16_t return_value_offset_index);
 
+    /// @brief finalize the program block with a revert instruction
+    /// Similar to finalize_with_return but uses REVERT opcode instead.
+    /// Sets the terminator type to REVERT.
+    void finalize_with_revert(uint8_t revert_size,
+                              MemoryTagWrapper revert_value_tag,
+                              uint16_t revert_value_offset_index);
+
     /// @brief finalize the block with a jump
-    /// NOTE: this method does not actually insert the jump instruction, it only sets the target block and the
-    /// terminated flag
+    /// Sets the terminator type to JUMP, adds the target block to the successors and the current block to the
+    /// predecessors.
     void finalize_with_jump(ProgramBlock* target_block, bool copy_memory_manager = true);
 
     /// @brief finalize the block with a jump if
-    /// NOTE: this method does not actually insert the jump if instruction, it only sets the target blocks and the
-    /// terminated flag
+    /// Sets the terminator type to JUMP_IF, adds the target blocks to the successors and the current block to the
+    /// predecessors. Sets the condition offset index.
     void finalize_with_jump_if(ProgramBlock* target_then_block,
                                ProgramBlock* target_else_block,
                                uint16_t condition_offset,
                                bool copy_memory_manager = true);
 
+    /// @brief insert INTERNALCALL instruction with 0 offset
+    void insert_internal_call(ProgramBlock* target_block);
+
     std::optional<uint16_t> get_terminating_condition_value();
     std::vector<bb::avm2::simulation::Instruction> get_instructions();
 
     bool is_memory_address_set(uint16_t address);
+
+    /// @brief in `insert_internal_call`  we insert INTERNALCALL instruction with 0 offset, because we don't know the
+    /// resulting block offsets this method patches the INTERNALCALL instructions with the actual offset
+    void patch_internal_calls();
 };

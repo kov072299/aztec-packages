@@ -1,7 +1,7 @@
 import type { EpochCacheInterface } from '@aztec/epoch-cache';
-import { makeEthSignDigest, tryRecoverAddress } from '@aztec/foundation/crypto';
+import { makeEthSignDigest, tryRecoverAddress } from '@aztec/foundation/crypto/secp256k1-signer';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import type { EthAddress } from '@aztec/foundation/eth-address';
-import { Fr } from '@aztec/foundation/fields';
 import { createLogger } from '@aztec/foundation/log';
 import { bufferToHex } from '@aztec/foundation/string';
 import { DateProvider } from '@aztec/foundation/timer';
@@ -278,6 +278,7 @@ export class PeerManager implements PeerManagerInterface {
   private handleConnectedPeerEvent(e: CustomEvent<PeerId>) {
     const peerId = e.detail;
     this.logger.verbose(`Connected to peer ${peerId.toString()}`);
+    this.metrics.peerConnected(peerId);
     if (this.config.p2pDisableStatusHandshake) {
       return;
     }
@@ -303,6 +304,7 @@ export class PeerManager implements PeerManagerInterface {
    */
   private handleDisconnectedPeerEvent(e: CustomEvent<PeerId>) {
     const peerId = e.detail;
+    this.metrics.peerDisconnected(peerId);
     this.logger.verbose(`Disconnected from peer ${peerId.toString()}`);
     const validatorAddress = this.authenticatedPeerIdToValidatorAddress.get(peerId.toString());
     if (validatorAddress !== undefined) {
@@ -577,9 +579,11 @@ export class PeerManager implements PeerManagerInterface {
       const score = this.peerScoring.getScoreState(peer.remotePeer.toString());
       switch (score) {
         case PeerScoreState.Banned:
+          this.metrics.recordLowScoreDisconnect('Banned');
           void this.goodbyeAndDisconnectPeer(peer.remotePeer, GoodByeReason.BANNED);
           break;
         case PeerScoreState.Disconnect:
+          this.metrics.recordLowScoreDisconnect('Disconnect');
           void this.goodbyeAndDisconnectPeer(peer.remotePeer, GoodByeReason.LOW_SCORE);
           break;
         case PeerScoreState.Healthy:

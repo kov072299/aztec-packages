@@ -1,5 +1,6 @@
 import { PRIVATE_CIRCUIT_PUBLIC_INPUTS_LENGTH, PRIVATE_CONTEXT_INPUTS_LENGTH } from '@aztec/constants';
-import { Fr } from '@aztec/foundation/fields';
+import { BlockNumber } from '@aztec/foundation/branded-types';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { createLogger } from '@aztec/foundation/log';
 import { Timer } from '@aztec/foundation/timer';
 import { ProtocolContractAddress } from '@aztec/protocol-contracts';
@@ -26,7 +27,7 @@ import type { CircuitWitnessGenerationStats } from '@aztec/stdlib/stats';
 import { BlockHeader, PrivateCallExecutionResult } from '@aztec/stdlib/tx';
 import type { UInt64 } from '@aztec/stdlib/types';
 
-import type { ExecutionDataProvider } from '../execution_data_provider.js';
+import { ContractStore } from '../../storage/contract_store/index.js';
 import { Oracle } from './oracle.js';
 import type { PrivateExecutionOracle } from './private_execution_oracle.js';
 
@@ -153,7 +154,7 @@ export function extractPrivateCircuitPublicInputs(
  * from the instance is used.
  * @param contractAddress - The address of the contract to read the class id for.
  * @param instance - The instance of the contract.
- * @param executionDataProvider - The execution data provider.
+ * @param executionStore - The execution data provider.
  * @param blockNumber - The block number at which to load the DelayedPublicMutable storing the class id.
  * @param timestamp - The timestamp at which to obtain the class id from the DelayedPublicMutable.
  * @returns The current class id.
@@ -161,13 +162,13 @@ export function extractPrivateCircuitPublicInputs(
 export async function readCurrentClassId(
   contractAddress: AztecAddress,
   instance: ContractInstance,
-  executionDataProvider: ExecutionDataProvider | AztecNode,
-  blockNumber: number,
+  aztecNode: AztecNode,
+  blockNumber: BlockNumber,
   timestamp: UInt64,
 ) {
   const { delayedPublicMutableSlot } = await DelayedPublicMutableValuesWithHash.getContractUpdateSlots(contractAddress);
   const delayedPublicMutableValues = await DelayedPublicMutableValues.readFromTree(delayedPublicMutableSlot, slot =>
-    executionDataProvider.getPublicStorageAt(blockNumber, ProtocolContractAddress.ContractInstanceRegistry, slot),
+    aztecNode.getPublicStorageAt(blockNumber, ProtocolContractAddress.ContractInstanceRegistry, slot),
   );
   let currentClassId = delayedPublicMutableValues.svc.getCurrentAt(timestamp)[0];
   if (currentClassId.isZero()) {
@@ -177,25 +178,26 @@ export async function readCurrentClassId(
 }
 
 /**
- * Verify that the current class id of a contract obtained from AztecNode is the same as the one in the execution data
- * provider (i.e. PXE).
- * @param contractAddress - The address of the contract to verify class id for.
- * @param executionDataProvider - The execution data provider.
+ * Verify that the current class id of a contract obtained from AztecNode is the same as the one in contract data
+ * provider (i.e. PXE's own storage).
  * @param header - The header of the block at which to verify the current class id. If not provided, the anchor block
  * header of the execution data provider is used.
  */
 export async function verifyCurrentClassId(
   contractAddress: AztecAddress,
-  executionDataProvider: ExecutionDataProvider,
-  header?: BlockHeader,
+  aztecNode: AztecNode,
+  contractStore: ContractStore,
+  header: BlockHeader,
 ) {
-  header = header ?? (await executionDataProvider.getAnchorBlockHeader());
+  const instance = await contractStore.getContractInstance(contractAddress);
+  if (!instance) {
+    throw new Error(`No contract instance found for address ${contractAddress.toString()}`);
+  }
 
-  const instance = await executionDataProvider.getContractInstance(contractAddress);
   const currentClassId = await readCurrentClassId(
     contractAddress,
     instance,
-    executionDataProvider,
+    aztecNode,
     header.globalVariables.blockNumber,
     header.globalVariables.timestamp,
   );

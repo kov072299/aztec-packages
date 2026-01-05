@@ -1,20 +1,17 @@
-import { Blob, getBlobsPerL1Block, getPrefixedEthBlobCommitments } from '@aztec/blob-lib';
-import { HttpBlobSinkClient } from '@aztec/blob-sink/client';
-import { inboundTransform } from '@aztec/blob-sink/encoding';
+import type { BlobClientInterface } from '@aztec/blob-client/client';
+import { getBlobsPerL1Block, getPrefixedEthBlobCommitments } from '@aztec/blob-lib';
 import type { EpochCache } from '@aztec/epoch-cache';
+import { type L1ContractsConfig, getL1ContractsConfigEnvVars } from '@aztec/ethereum/config';
 import {
   type EmpireSlashingProposerContract,
-  FormattedViemError,
-  type GasPrice,
   type GovernanceProposerContract,
-  type L1ContractsConfig,
-  type L1TxUtilsConfig,
   Multicall3,
-  RollupContract,
-  defaultL1TxUtilsConfig,
-  getL1ContractsConfigEnvVars,
-} from '@aztec/ethereum';
+  type RollupContract,
+} from '@aztec/ethereum/contracts';
+import { type GasPrice, type L1TxUtilsConfig, defaultL1TxUtilsConfig } from '@aztec/ethereum/l1-tx-utils';
 import type { L1TxUtilsWithBlobs } from '@aztec/ethereum/l1-tx-utils-with-blobs';
+import { FormattedViemError } from '@aztec/ethereum/utils';
+import { BlockNumber, EpochNumber, SlotNumber } from '@aztec/foundation/branded-types';
 import { EthAddress } from '@aztec/foundation/eth-address';
 import { sleep } from '@aztec/foundation/sleep';
 import { TestDateProvider } from '@aztec/foundation/timer';
@@ -24,10 +21,9 @@ import type { SlashFactoryContract } from '@aztec/stdlib/l1-contracts';
 import type { CheckpointHeader } from '@aztec/stdlib/rollup';
 
 import { jest } from '@jest/globals';
-import express, { json } from 'express';
-import type { Server } from 'http';
 import { type MockProxy, mock } from 'jest-mock-extended';
 import {
+  type GetCodeReturnType,
   type GetTransactionReceiptReturnType,
   type PrivateKeyAccount,
   type TransactionReceipt,
@@ -55,8 +51,6 @@ describe('compareActions sorting', () => {
 const mockRollupAddress = EthAddress.random().toString();
 const mockGovernanceProposerAddress = EthAddress.random().toString();
 const mockForwarderAddress = EthAddress.random().toString();
-const BLOB_SINK_PORT = 50525;
-const BLOB_SINK_URL = `http://localhost:${BLOB_SINK_PORT}`;
 
 describe('SequencerPublisher', () => {
   let rollup: MockProxy<RollupContract>;
@@ -74,8 +68,7 @@ describe('SequencerPublisher', () => {
   let header: CheckpointHeader;
   let archive: Buffer;
 
-  let blobSinkClient: HttpBlobSinkClient;
-  let mockBlobSinkServer: Server | undefined = undefined;
+  let blobClient: MockProxy<BlobClientInterface>;
 
   // An l1 publisher with some private methods exposed
   let publisher: SequencerPublisher;
@@ -87,10 +80,10 @@ describe('SequencerPublisher', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
 
-    mockBlobSinkServer = undefined;
-    blobSinkClient = new HttpBlobSinkClient({ blobSinkUrl: BLOB_SINK_URL });
+    blobClient = mock<BlobClientInterface>();
+    blobClient.sendBlobsToFilestore.mockResolvedValue(true);
 
-    l2Block = await L2Block.random(42);
+    l2Block = await L2Block.random(BlockNumber(42));
 
     header = l2Block.getCheckpointHeader();
     archive = l2Block.archive.root.toBuffer();
@@ -111,8 +104,8 @@ describe('SequencerPublisher', () => {
     l1TxUtils.getBlock.mockResolvedValue({ timestamp: 12n } as any);
     l1TxUtils.getBlockNumber.mockResolvedValue(1n);
     l1TxUtils.getSenderAddress.mockReturnValue(EthAddress.fromString(testHarnessAttesterAccount.address));
+    l1TxUtils.getCode.mockReturnValue(Promise.resolve(`0x1` as GetCodeReturnType));
     const config = {
-      blobSinkUrl: BLOB_SINK_URL,
       l1RpcUrls: [`http://127.0.0.1:8545`],
       l1ChainId: 1,
       l1Contracts: {
@@ -139,11 +132,11 @@ describe('SequencerPublisher', () => {
     slashFactoryContract = mock<SlashFactoryContract>();
 
     const epochCache = mock<EpochCache>();
-    epochCache.getEpochAndSlotNow.mockReturnValue({ epoch: 1n, slot: 2n, ts: 3n, now: 3n });
-    epochCache.getCommittee.mockResolvedValue({ committee: [], seed: 1n, epoch: 1n });
+    epochCache.getEpochAndSlotNow.mockReturnValue({ epoch: EpochNumber(1), slot: SlotNumber(2), ts: 3n, now: 3n });
+    epochCache.getCommittee.mockResolvedValue({ committee: [], seed: 1n, epoch: EpochNumber(1) });
 
     publisher = new SequencerPublisher(config, {
-      blobSinkClient,
+      blobClient,
       rollupContract: rollup,
       l1TxUtils,
       epochCache,
@@ -172,60 +165,23 @@ describe('SequencerPublisher', () => {
 
     const currentL2Slot = publisher.getCurrentL2Slot();
 
-    l2Block = await L2Block.random(42, undefined, undefined, undefined, undefined, Number(currentL2Slot));
+    l2Block = await L2Block.random(BlockNumber(42), undefined, undefined, undefined, undefined, Number(currentL2Slot));
 
     header = l2Block.getCheckpointHeader();
     archive = l2Block.archive.root.toBuffer();
   });
 
-  const closeServer = (server: Server): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      server.close(err => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        resolve();
-      });
-    });
-  };
-
-  afterEach(async () => {
-    if (mockBlobSinkServer) {
-      await closeServer(mockBlobSinkServer);
-      mockBlobSinkServer = undefined;
-    }
+  afterEach(() => {
     forwardSpy.mockRestore();
   });
-
-  // Run a mock blob sink in the background, and test that the correct data is sent to it
-  const runBlobSinkServer = (blobs: Blob[]) => {
-    const app = express();
-    app.use(json({ limit: '10mb' }));
-
-    app.post('/blob_sidecar', (req, res) => {
-      const blobsBuffers = req.body.blobs.map((b: { index: number; blob: { type: string; data: string } }) =>
-        Blob.fromBuffer(inboundTransform(Buffer.from(b.blob.data))),
-      );
-
-      expect(blobsBuffers).toEqual(blobs);
-      res.status(200).send();
-    });
-
-    return new Promise<void>(resolve => {
-      mockBlobSinkServer = app.listen(BLOB_SINK_PORT, () => {
-        // Resolve when the server is listening
-        resolve();
-      });
-    });
-  };
 
   const mockGovernancePayload = () => {
     const govPayload = EthAddress.random();
     const voteSig = Signature.random();
     governanceProposerContract.getRoundInfo.mockResolvedValue({
-      lastSignalSlot: 1n,
+      lastSignalSlot: SlotNumber(1),
       payloadWithMostSignals: govPayload.toString(),
+      quorumReached: false,
       executed: false,
     });
     governanceProposerContract.createSignalRequestWithSignature.mockResolvedValue({
@@ -242,12 +198,11 @@ describe('SequencerPublisher', () => {
   it('bundles propose and vote tx to l1', async () => {
     const expectedBlobs = getBlobsPerL1Block(l2Block.getCheckpointBlobFields());
 
-    // Expect the blob sink server to receive the blobs
-    await runBlobSinkServer(expectedBlobs);
-
-    expect(
-      await publisher.enqueueProposeL2Block(l2Block, CommitteeAttestationsAndSigners.empty(), Signature.empty()),
-    ).toEqual(true);
+    await publisher.enqueueProposeCheckpoint(
+      l2Block.toCheckpoint(),
+      CommitteeAttestationsAndSigners.empty(),
+      Signature.empty(),
+    );
 
     const { govPayload, voteSig } = mockGovernancePayload();
 
@@ -256,7 +211,7 @@ describe('SequencerPublisher', () => {
     expect(
       await publisher.enqueueGovernanceCastSignal(
         govPayload,
-        2n,
+        SlotNumber(2),
         1n,
         EthAddress.fromString(testHarnessAttesterAccount.address),
         msg => testHarnessAttesterAccount.signTypedData(msg),
@@ -276,7 +231,6 @@ describe('SequencerPublisher', () => {
       {
         header: header.toViem(),
         archive: toHex(archive),
-        stateReference: l2Block.header.state.toViem(),
         oracleInput: {
           feeAssetPriceModifier: 0n,
         },
@@ -330,12 +284,11 @@ describe('SequencerPublisher', () => {
       errorMsg: undefined,
     });
 
-    const enqueued = await publisher.enqueueProposeL2Block(
-      l2Block,
+    await publisher.enqueueProposeCheckpoint(
+      l2Block.toCheckpoint(),
       CommitteeAttestationsAndSigners.empty(),
       Signature.empty(),
     );
-    expect(enqueued).toEqual(true);
     const result = await publisher.sendRequests();
     expect(result).toEqual(undefined);
   });
@@ -344,7 +297,11 @@ describe('SequencerPublisher', () => {
     l1TxUtils.simulate.mockRejectedValueOnce(new Error('Test error'));
 
     await expect(
-      publisher.enqueueProposeL2Block(l2Block, CommitteeAttestationsAndSigners.empty(), Signature.empty()),
+      publisher.enqueueProposeCheckpoint(
+        l2Block.toCheckpoint(),
+        CommitteeAttestationsAndSigners.empty(),
+        Signature.empty(),
+      ),
     ).rejects.toThrow();
 
     expect(l1TxUtils.simulate).toHaveBeenCalledTimes(1);
@@ -360,12 +317,11 @@ describe('SequencerPublisher', () => {
       errorMsg: 'Test error',
     });
 
-    const enqueued = await publisher.enqueueProposeL2Block(
-      l2Block,
+    await publisher.enqueueProposeCheckpoint(
+      l2Block.toCheckpoint(),
       CommitteeAttestationsAndSigners.empty(),
       Signature.empty(),
     );
-    expect(enqueued).toEqual(true);
     const result = await publisher.sendRequests();
 
     expect(result).not.toBeInstanceOf(FormattedViemError);
@@ -385,12 +341,11 @@ describe('SequencerPublisher', () => {
           errorMsg: undefined;
         }>,
     );
-    const enqueued = await publisher.enqueueProposeL2Block(
-      l2Block,
+    await publisher.enqueueProposeCheckpoint(
+      l2Block.toCheckpoint(),
       CommitteeAttestationsAndSigners.empty(),
       Signature.empty(),
     );
-    expect(enqueued).toEqual(true);
     publisher.interrupt();
     const resultPromise = publisher.sendRequests();
     const result = await resultPromise;
@@ -411,7 +366,7 @@ describe('SequencerPublisher', () => {
           args: [EthAddress.random().toString()],
         }),
       },
-      lastValidL2Slot: 1n,
+      lastValidL2Slot: SlotNumber(1),
       checkSuccess: () => true,
     });
 
@@ -421,5 +376,41 @@ describe('SequencerPublisher', () => {
     expect(result).toEqual(undefined);
     expect(forwardSpy).not.toHaveBeenCalled();
     expect((publisher as any).requests.length).toEqual(0);
+  });
+
+  it('does not signal for payload when quorum is reached', async () => {
+    const { govPayload } = mockGovernancePayload();
+
+    governanceProposerContract.getRoundInfo.mockResolvedValue({
+      lastSignalSlot: SlotNumber(1),
+      payloadWithMostSignals: govPayload.toString(),
+      quorumReached: true,
+      executed: false,
+    });
+
+    expect(
+      await publisher.enqueueGovernanceCastSignal(
+        govPayload,
+        SlotNumber(2),
+        1n,
+        EthAddress.fromString(testHarnessAttesterAccount.address),
+        msg => testHarnessAttesterAccount.signTypedData(msg),
+      ),
+    ).toEqual(false);
+  });
+
+  it.each<GetCodeReturnType>([undefined])('does not signal for payload with empty code', async code => {
+    const { govPayload } = mockGovernancePayload();
+    l1TxUtils.getCode.mockReturnValue(Promise.resolve(code));
+
+    expect(
+      await publisher.enqueueGovernanceCastSignal(
+        govPayload,
+        SlotNumber(2),
+        1n,
+        EthAddress.fromString(testHarnessAttesterAccount.address),
+        msg => testHarnessAttesterAccount.signTypedData(msg),
+      ),
+    ).toEqual(false);
   });
 });

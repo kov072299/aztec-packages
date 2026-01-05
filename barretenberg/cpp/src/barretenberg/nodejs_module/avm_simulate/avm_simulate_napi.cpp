@@ -10,10 +10,25 @@
 #include "barretenberg/serialize/msgpack_impl/msgpack_impl.hpp"
 #include "barretenberg/vm2/avm_sim_api.hpp"
 #include "barretenberg/vm2/common/avm_io.hpp"
+#include "barretenberg/vm2/simulation/lib/cancellation_token.hpp"
 
 namespace bb::nodejs {
 
 namespace {
+// Log levels from TS foundation/src/log/log-levels.ts: ['silent', 'fatal', 'error', 'warn', 'info', 'verbose', 'debug',
+// 'trace'] Map: 0=silent, 1=fatal, 2=error, 3=warn, 4=info, 5=verbose, 6=debug, 7=trace
+constexpr int LOG_LEVEL_VERBOSE = 5;
+constexpr int LOG_LEVEL_TRACE = 7;
+
+// Helper to set logging flags based on TS log level
+inline void set_logging_from_level(int log_level)
+{
+    // Turn verbose_logging on if log level is verbose (5) or above
+    verbose_logging = (log_level >= LOG_LEVEL_VERBOSE);
+    // Turn debug_logging on if log level is trace (7) or above
+    debug_logging = (log_level >= LOG_LEVEL_TRACE);
+}
+
 // Callback method names
 constexpr const char* CALLBACK_GET_CONTRACT_INSTANCE = "getContractInstance";
 constexpr const char* CALLBACK_GET_CONTRACT_CLASS = "getContractClass";
@@ -100,20 +115,18 @@ struct ContractCallbacks {
 
 Napi::Value AvmSimulateNapi::simulate(const Napi::CallbackInfo& cb_info)
 {
-    // TODO(dbanks12): configurable verbosity (maybe based on TS log level)
-    // verbose_logging = true;
-    // debug_logging = true;
-
     Napi::Env env = cb_info.Env();
 
-    // Validate arguments - expects 3 arguments
+    // Validate arguments - expects 4-5 arguments
     // arg[0]: inputs Buffer (required)
     // arg[1]: contractProvider object (required)
     // arg[2]: worldStateHandle external (required)
-    if (cb_info.Length() < 3) {
+    // arg[3]: logLevel number (required) - index into TS LogLevels array
+    // arg[4]: cancellationToken external (optional)
+    if (cb_info.Length() < 4) {
         throw Napi::TypeError::New(env,
-                                   "Wrong number of arguments. Expected 3 arguments: inputs Buffer, contractProvider "
-                                   "object, and worldStateHandle.");
+                                   "Wrong number of arguments. Expected 4-5 arguments: inputs Buffer, contractProvider "
+                                   "object, worldStateHandle, logLevel, and optional cancellationToken.");
     }
 
     if (!cb_info[0].IsBuffer()) {
@@ -128,6 +141,27 @@ Napi::Value AvmSimulateNapi::simulate(const Napi::CallbackInfo& cb_info)
     if (!cb_info[2].IsExternal()) {
         throw Napi::TypeError::New(env, "Third argument must be a WorldState handle (External)");
     }
+
+    if (!cb_info[3].IsNumber()) {
+        throw Napi::TypeError::New(env, "Fourth argument must be a log level number (0-7)");
+    }
+
+    // Extract optional cancellation token (5th argument)
+    avm2::simulation::CancellationTokenPtr cancellation_token = nullptr;
+    if (cb_info.Length() > 4 && cb_info[4].IsExternal()) {
+        auto token_external = cb_info[4].As<Napi::External<avm2::simulation::CancellationToken>>();
+        // Wrap the raw pointer in a shared_ptr that does NOT delete (since the External owns it)
+        cancellation_token = std::shared_ptr<avm2::simulation::CancellationToken>(
+            token_external.Data(), [](avm2::simulation::CancellationToken*) {
+                // No-op deleter: the External
+                // (via shared_ptr destructor
+                // callback) owns the token
+            });
+    }
+
+    // Extract log level and set logging flags
+    int log_level = cb_info[3].As<Napi::Number>().Int32Value();
+    set_logging_from_level(log_level);
 
     // Extract the inputs buffer
     auto inputs_buffer = cb_info[0].As<Napi::Buffer<uint8_t>>();
@@ -170,42 +204,46 @@ Napi::Value AvmSimulateNapi::simulate(const Napi::CallbackInfo& cb_info)
     auto deferred = std::make_shared<Napi::Promise::Deferred>(env);
 
     // Create async operation that will run on a worker thread
-    auto* op = new AsyncOperation(env, deferred, [data, tsfns, ws_ptr](msgpack::sbuffer& result_buffer) {
-        // Ensure all thread-safe functions are released in all code paths
-        TsfnReleaser releaser = TsfnReleaser(tsfns.to_vector());
+    auto* op =
+        new AsyncOperation(env, deferred, [data, tsfns, ws_ptr, cancellation_token](msgpack::sbuffer& result_buffer) {
+            // Ensure all thread-safe functions are released in all code paths
+            TsfnReleaser releaser = TsfnReleaser(tsfns.to_vector());
 
-        try {
-            // Deserialize inputs from msgpack
-            avm2::AvmFastSimulationInputs inputs;
-            msgpack::object_handle obj_handle =
-                msgpack::unpack(reinterpret_cast<const char*>(data->data()), data->size());
-            msgpack::object obj = obj_handle.get();
-            obj.convert(inputs);
+            try {
+                // Deserialize inputs from msgpack
+                avm2::AvmFastSimulationInputs inputs;
+                msgpack::object_handle obj_handle =
+                    msgpack::unpack(reinterpret_cast<const char*>(data->data()), data->size());
+                msgpack::object obj = obj_handle.get();
+                obj.convert(inputs);
 
-            // Create TsCallbackContractDB with TypeScript callbacks
-            TsCallbackContractDB contract_db(*tsfns.instance,
-                                             *tsfns.class_,
-                                             *tsfns.add_contracts,
-                                             *tsfns.bytecode,
-                                             *tsfns.debug_name,
-                                             *tsfns.create_checkpoint,
-                                             *tsfns.commit_checkpoint,
-                                             *tsfns.revert_checkpoint);
+                // Create TsCallbackContractDB with TypeScript callbacks
+                TsCallbackContractDB contract_db(*tsfns.instance,
+                                                 *tsfns.class_,
+                                                 *tsfns.add_contracts,
+                                                 *tsfns.bytecode,
+                                                 *tsfns.debug_name,
+                                                 *tsfns.create_checkpoint,
+                                                 *tsfns.commit_checkpoint,
+                                                 *tsfns.revert_checkpoint);
 
-            // Create AVM API and run simulation with the callback-based contracts DB and
-            // WorldState reference
-            avm2::AvmSimAPI avm;
-            avm2::TxSimulationResult result = avm.simulate(inputs, contract_db, *ws_ptr);
+                // Create AVM API and run simulation with the callback-based contracts DB,
+                // WorldState reference, and optional cancellation token
+                avm2::AvmSimAPI avm;
+                avm2::TxSimulationResult result = avm.simulate(inputs, contract_db, *ws_ptr, cancellation_token);
 
-            // Serialize the simulation result with msgpack into the return buffer to TS.
-            msgpack::pack(result_buffer, result);
-        } catch (const std::exception& e) {
-            // Rethrow with context (RAII wrappers will clean up automatically)
-            throw std::runtime_error(std::string("AVM simulation failed: ") + e.what());
-        } catch (...) {
-            throw std::runtime_error("AVM simulation failed with unknown exception");
-        }
-    });
+                // Serialize the simulation result with msgpack into the return buffer to TS.
+                msgpack::pack(result_buffer, result);
+            } catch (const avm2::simulation::CancelledException& e) {
+                // Cancellation is an expected condition, rethrow with context
+                throw std::runtime_error("Simulation cancelled");
+            } catch (const std::exception& e) {
+                // Rethrow with context (RAII wrappers will clean up automatically)
+                throw std::runtime_error(std::string("AVM simulation failed: ") + e.what());
+            } catch (...) {
+                throw std::runtime_error("AVM simulation failed with unknown exception");
+            }
+        });
 
     // Napi is now responsible for destroying this object
     op->Queue();
@@ -215,23 +253,29 @@ Napi::Value AvmSimulateNapi::simulate(const Napi::CallbackInfo& cb_info)
 
 Napi::Value AvmSimulateNapi::simulateWithHintedDbs(const Napi::CallbackInfo& cb_info)
 {
-    // TODO(dbanks12): configurable verbosity (maybe based on TS log level)
-    verbose_logging = true;
-    debug_logging = true;
-
     Napi::Env env = cb_info.Env();
 
-    // Validate arguments - expects 1 argument
+    // Validate arguments - expects 2 arguments
     // arg[0]: inputs Buffer (required) - AvmProvingInputs
-    if (cb_info.Length() < 1) {
-        throw Napi::TypeError::New(
-            env, "Wrong number of arguments. Expected 1 argument: AvmProvingInputs/AvmCircuitInputs msgpack Buffer.");
+    // arg[1]: logLevel number (required) - index into TS LogLevels array
+    if (cb_info.Length() < 2) {
+        throw Napi::TypeError::New(env,
+                                   "Wrong number of arguments. Expected 2 arguments: AvmProvingInputs/AvmCircuitInputs "
+                                   "msgpack Buffer and logLevel.");
     }
 
     if (!cb_info[0].IsBuffer()) {
         throw Napi::TypeError::New(
             env, "First argument must be a Buffer containing serialized AvmProvingInputs/AvmCircuitInputs");
     }
+
+    if (!cb_info[1].IsNumber()) {
+        throw Napi::TypeError::New(env, "Second argument must be a log level number (0-7)");
+    }
+
+    // Extract log level and set logging flags
+    int log_level = cb_info[1].As<Napi::Number>().Int32Value();
+    set_logging_from_level(log_level);
 
     // Extract the inputs buffer
     auto inputs_buffer = cb_info[0].As<Napi::Buffer<uint8_t>>();
@@ -272,6 +316,36 @@ Napi::Value AvmSimulateNapi::simulateWithHintedDbs(const Napi::CallbackInfo& cb_
     op->Queue();
 
     return deferred->Promise();
+}
+
+Napi::Value AvmSimulateNapi::createCancellationToken(const Napi::CallbackInfo& cb_info)
+{
+    Napi::Env env = cb_info.Env();
+
+    // Create a new CancellationToken. We use a shared_ptr to manage the lifetime,
+    // and the destructor callback in the External will clean it up when GC runs.
+    auto* token = new avm2::simulation::CancellationToken();
+
+    // Create an External with a destructor callback that deletes the token
+    return Napi::External<avm2::simulation::CancellationToken>::New(
+        env, token, [](Napi::Env /*env*/, avm2::simulation::CancellationToken* t) { delete t; });
+}
+
+Napi::Value AvmSimulateNapi::cancelSimulation(const Napi::CallbackInfo& cb_info)
+{
+    Napi::Env env = cb_info.Env();
+
+    if (cb_info.Length() < 1 || !cb_info[0].IsExternal()) {
+        throw Napi::TypeError::New(env, "Expected a CancellationToken External as argument");
+    }
+
+    auto token_external = cb_info[0].As<Napi::External<avm2::simulation::CancellationToken>>();
+    avm2::simulation::CancellationToken* token = token_external.Data();
+
+    // Signal cancellation - this is thread-safe (atomic store)
+    token->cancel();
+
+    return env.Undefined();
 }
 
 } // namespace bb::nodejs

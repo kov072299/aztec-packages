@@ -1,6 +1,8 @@
+import type { EpochNumber, SlotNumber } from '@aztec/foundation/branded-types';
 import type { Buffer32 } from '@aztec/foundation/buffer';
+import type { Fq, Fr } from '@aztec/foundation/curves/bn254';
+import type { Point } from '@aztec/foundation/curves/grumpkin';
 import type { EthAddress } from '@aztec/foundation/eth-address';
-import type { Fq, Fr, Point } from '@aztec/foundation/fields';
 import { type ZodFor, schemas as foundationSchemas } from '@aztec/foundation/schemas';
 
 import { z } from 'zod';
@@ -38,6 +40,9 @@ export const schemas = {
   /** Coerces input to UInt32. */
   UInt32: foundationSchemas.UInt32,
 
+  /** Coerces input to UInt64. */
+  UInt64: foundationSchemas.UInt64,
+
   /** Accepts a hex string as a Buffer32 type. */
   Buffer32: foundationSchemas.Buffer32 as ZodFor<Buffer32>,
 
@@ -65,6 +70,12 @@ export const schemas = {
   /** Accepts a hex string. */
   EventSelector: EventSelector.schema,
 
+  /** Accepts a number, bigint, or string and coerces to SlotNumber. */
+  SlotNumber: foundationSchemas.SlotNumber as ZodFor<SlotNumber>,
+
+  /** Accepts a number, bigint, or string and coerces to EpochNumber. */
+  EpochNumber: foundationSchemas.EpochNumber as ZodFor<EpochNumber>,
+
   GasUsed: z.object({
     totalGas: Gas.schema,
     teardownGas: Gas.schema,
@@ -86,6 +97,7 @@ export const NullishToUndefined = (schema: ZodFor<any>) => schema.nullish().tran
 
 export {
   type ZodFor,
+  zodFor,
   bufferSchema,
   hexSchema,
   hexSchemaFor,

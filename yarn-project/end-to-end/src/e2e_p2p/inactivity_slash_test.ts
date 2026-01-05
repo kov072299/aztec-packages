@@ -1,6 +1,7 @@
 import type { AztecNodeService } from '@aztec/aztec-node';
 import { EthAddress } from '@aztec/aztec.js/addresses';
-import { RollupContract } from '@aztec/ethereum';
+import { RollupContract } from '@aztec/ethereum/contracts';
+import { EpochNumber } from '@aztec/foundation/branded-types';
 
 import fs from 'fs';
 import 'jest-extended';
@@ -23,7 +24,7 @@ const SLASHING_UNIT = BigInt(1e18);
 const SLASHING_AMOUNT = SLASHING_UNIT * 3n;
 
 // How many epochs it may take to set everything up, so we dont slash during this period
-const SETUP_EPOCH_DURATION = 5;
+const SETUP_EPOCH_DURATION = 8;
 
 export class P2PInactivityTest {
   public nodes!: AztecNodeService[];
@@ -150,8 +151,8 @@ export class P2PInactivityTest {
     // This prevents race conditions where validators propose blocks before the network is ready
     await this.test.waitForP2PMeshConnectivity(this.nodes, NUM_NODES);
 
-    this.test.logger.warn(`Advancing to epoch ${SETUP_EPOCH_DURATION + 1} to start slashing`);
-    await this.test.ctx.cheatCodes.rollup.advanceToEpoch(SETUP_EPOCH_DURATION + 1);
+    this.test.logger.warn(`Advancing to epoch ${SETUP_EPOCH_DURATION - 1} (slashing will start after it is completed)`);
+    await this.test.ctx.cheatCodes.rollup.advanceToEpoch(EpochNumber(SETUP_EPOCH_DURATION - 1));
 
     return this;
   }

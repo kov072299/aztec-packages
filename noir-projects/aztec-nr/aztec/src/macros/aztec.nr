@@ -196,21 +196,23 @@ comptime fn generate_contract_library_method_compute_note_hash_and_nullifier() -
 
                         let note = $unpack(aztec::utils::array::subarray(packed_note.storage(), 0));
 
-                        let note_hash = $compute_note_hash(note, storage_slot);
+                        let note_hash = $compute_note_hash(note, owner, storage_slot, randomness);
     
                         // The message discovery process finds settled notes, that is, notes that were created in prior
                         // transactions and are therefore already part of the note hash tree. We therefore compute the
                         // nullification note hash by treating the note as a settled note with the provided note nonce.
                         let note_hash_for_nullification = aztec::note::utils::compute_note_hash_for_nullification(
                             aztec::note::retrieved_note::RetrievedNote{ 
-                                note, 
-                                contract_address, 
+                                note,
+                                contract_address,
+                                owner,
+                                randomness,
+                                storage_slot,
                                 metadata: aztec::note::note_metadata::SettledNoteMetadata::new(note_nonce).into()
-                            }, 
-                            storage_slot,
+                            }
                         );
 
-                        let inner_nullifier = $compute_nullifier_unconstrained(note, note_hash_for_nullification);
+                        let inner_nullifier = $compute_nullifier_unconstrained(note, owner, note_hash_for_nullification);
 
                         Option::some(
                             aztec::messages::discovery::NoteHashAndNullifier {
@@ -236,10 +238,12 @@ comptime fn generate_contract_library_method_compute_note_hash_and_nullifier() -
             /// This function is automatically injected by the `#[aztec]` macro.
             #[contract_library_method]
             unconstrained fn _compute_note_hash_and_nullifier(
-                packed_note: BoundedVec<Field, aztec::messages::discovery::private_notes::MAX_NOTE_PACKED_LEN>,
+                packed_note: BoundedVec<Field, aztec::messages::logs::note::MAX_NOTE_PACKED_LEN>,
+                owner: aztec::protocol_types::address::AztecAddress,
                 storage_slot: Field,
                 note_type_id: Field,
                 contract_address: aztec::protocol_types::address::AztecAddress,
+                randomness: Field,
                 note_nonce: Field,
             ) -> Option<aztec::messages::discovery::NoteHashAndNullifier> {
                 $if_note_type_id_match_statements
@@ -258,10 +262,12 @@ comptime fn generate_contract_library_method_compute_note_hash_and_nullifier() -
             /// This function is automatically injected by the `#[aztec]` macro.
             #[contract_library_method]
             unconstrained fn _compute_note_hash_and_nullifier(
-                _packed_note: BoundedVec<Field, aztec::messages::discovery::private_notes::MAX_NOTE_PACKED_LEN>,
+                _packed_note: BoundedVec<Field, aztec::messages::logs::note::MAX_NOTE_PACKED_LEN>,
+                _owner: aztec::protocol_types::address::AztecAddress,
                 _storage_slot: Field,
                 _note_type_id: Field,
                 _contract_address: aztec::protocol_types::address::AztecAddress,
+                _randomness: Field,
                 _nonce: Field,
             ) -> Option<aztec::messages::discovery::NoteHashAndNullifier> {
                 panic(f"This contract does not use private notes")

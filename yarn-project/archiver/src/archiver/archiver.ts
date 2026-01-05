@@ -1,23 +1,23 @@
-import type { BlobSinkClientInterface } from '@aztec/blob-sink/client';
+import type { BlobClientInterface } from '@aztec/blob-client/client';
+import { GENESIS_BLOCK_HEADER_HASH } from '@aztec/constants';
 import { EpochCache } from '@aztec/epoch-cache';
-import {
-  BlockTagTooOldError,
-  InboxContract,
-  type L1BlockId,
-  RollupContract,
-  type ViemPublicClient,
-  createEthereumChain,
-} from '@aztec/ethereum';
+import { createEthereumChain } from '@aztec/ethereum/chain';
+import { BlockTagTooOldError, InboxContract, RollupContract } from '@aztec/ethereum/contracts';
+import type { L1ContractAddresses } from '@aztec/ethereum/l1-contract-addresses';
+import type { L1BlockId } from '@aztec/ethereum/l1-types';
+import type { ViemPublicClient, ViemPublicDebugClient } from '@aztec/ethereum/types';
 import { maxBigint } from '@aztec/foundation/bigint';
+import { BlockNumber, CheckpointNumber, EpochNumber, SlotNumber } from '@aztec/foundation/branded-types';
 import { Buffer16, Buffer32 } from '@aztec/foundation/buffer';
 import { merge, pick } from '@aztec/foundation/collection';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import type { EthAddress } from '@aztec/foundation/eth-address';
-import { Fr } from '@aztec/foundation/fields';
 import { type Logger, createLogger } from '@aztec/foundation/log';
 import { type PromiseWithResolvers, promiseWithResolvers } from '@aztec/foundation/promise';
 import { RunningPromise, makeLoggingErrorHandler } from '@aztec/foundation/running-promise';
 import { count } from '@aztec/foundation/string';
 import { DateProvider, Timer, elapsed } from '@aztec/foundation/timer';
+import { isDefined } from '@aztec/foundation/types';
 import type { CustomRange } from '@aztec/kv-store';
 import { RollupAbi } from '@aztec/l1-artifacts';
 import {
@@ -33,12 +33,17 @@ import type { FunctionSelector } from '@aztec/stdlib/abi';
 import type { AztecAddress } from '@aztec/stdlib/aztec-address';
 import {
   type ArchiverEmitter,
-  type L2Block,
-  type L2BlockId,
+  CheckpointedL2Block,
+  CommitteeAttestation,
+  L2Block,
+  L2BlockNew,
+  type L2BlockSink,
   type L2BlockSource,
   L2BlockSourceEvents,
   type L2Tips,
+  PublishedL2Block,
 } from '@aztec/stdlib/block';
+import { Checkpoint, PublishedCheckpoint } from '@aztec/stdlib/checkpoint';
 import {
   type ContractClassPublic,
   type ContractDataSource,
@@ -59,8 +64,17 @@ import {
 } from '@aztec/stdlib/epoch-helpers';
 import type { GetContractClassLogsResponse, GetPublicLogsResponse } from '@aztec/stdlib/interfaces/client';
 import type { L2LogsSource } from '@aztec/stdlib/interfaces/server';
-import { ContractClassLog, type LogFilter, type PrivateLog, type PublicLog, TxScopedL2Log } from '@aztec/stdlib/logs';
-import type { L1ToL2MessageSource } from '@aztec/stdlib/messaging';
+import {
+  ContractClassLog,
+  type LogFilter,
+  type PrivateLog,
+  type PublicLog,
+  type SiloedTag,
+  Tag,
+  TxScopedL2Log,
+} from '@aztec/stdlib/logs';
+import { type L1ToL2MessageSource, computeInHashFromL1ToL2Messages } from '@aztec/stdlib/messaging';
+import type { CheckpointHeader } from '@aztec/stdlib/rollup';
 import { type BlockHeader, type IndexedTxEffect, TxHash, TxReceipt } from '@aztec/stdlib/tx';
 import type { UInt64 } from '@aztec/stdlib/types';
 import {
@@ -77,26 +91,34 @@ import { type GetContractReturnType, type Hex, createPublicClient, fallback, htt
 
 import type { ArchiverDataStore, ArchiverL1SynchPoint } from './archiver_store.js';
 import type { ArchiverConfig } from './config.js';
+import { InitialCheckpointNumberNotSequentialError, NoBlobBodiesFoundError } from './errors.js';
+import { ArchiverInstrumentation } from './instrumentation.js';
+import type { CheckpointData } from './kv_archiver_store/block_store.js';
 import {
-  retrieveBlocksFromRollup,
+  retrieveCheckpointsFromRollup,
   retrieveL1ToL2Message,
   retrieveL1ToL2Messages,
-  retrievedBlockToPublishedL2Block,
-} from './data_retrieval.js';
-import { InitialBlockNumberNotSequentialError, NoBlobBodiesFoundError } from './errors.js';
-import { ArchiverInstrumentation } from './instrumentation.js';
+  retrievedToPublishedCheckpoint,
+} from './l1/data_retrieval.js';
+import { validateAndLogTraceAvailability } from './l1/validate_trace.js';
 import type { InboxMessage } from './structs/inbox_message.js';
-import type { PublishedL2Block } from './structs/published.js';
-import { type ValidateBlockResult, validateBlockAttestations } from './validation.js';
+import { type ValidateBlockResult, validateCheckpointAttestations } from './validation.js';
 
 /**
  * Helper interface to combine all sources this archiver implementation provides.
  */
 export type ArchiveSource = L2BlockSource & L2LogsSource & ContractDataSource & L1ToL2MessageSource;
 
+/** Request to add a block to the archiver, queued for processing by the sync loop. */
+type AddBlockRequest = {
+  block: L2BlockNew;
+  resolve: () => void;
+  reject: (err: Error) => void;
+};
+
 export type ArchiverDeps = {
   telemetry?: TelemetryClient;
-  blobSinkClient: BlobSinkClientInterface;
+  blobClient: BlobClientInterface;
   epochCache?: EpochCache;
   dateProvider?: DateProvider;
 };
@@ -107,26 +129,30 @@ function mapArchiverConfig(config: Partial<ArchiverConfig>) {
     batchSize: config.archiverBatchSize,
     skipValidateBlockAttestations: config.skipValidateBlockAttestations,
     maxAllowedEthClientDriftSeconds: config.maxAllowedEthClientDriftSeconds,
+    ethereumAllowNoDebugHosts: config.ethereumAllowNoDebugHosts,
   };
 }
 
 type RollupStatus = {
-  provenBlockNumber: number;
+  provenCheckpointNumber: CheckpointNumber;
   provenArchive: Hex;
-  pendingBlockNumber: number;
+  pendingCheckpointNumber: CheckpointNumber;
   pendingArchive: Hex;
   validationResult: ValidateBlockResult | undefined;
-  lastRetrievedBlock?: PublishedL2Block;
-  lastL1BlockWithL2Blocks?: bigint;
+  lastRetrievedCheckpoint?: PublishedCheckpoint;
+  lastL1BlockWithCheckpoint?: bigint;
 };
 
 /**
- * Pulls L2 blocks in a non-blocking manner and provides interface for their retrieval.
+ * Pulls checkpoints in a non-blocking manner and provides interface for their retrieval.
  * Responsible for handling robust L1 polling so that other components do not need to
  * concern themselves with it.
  */
-export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implements ArchiveSource, Traceable {
-  /** A loop in which we will be continually fetching new L2 blocks. */
+export class Archiver
+  extends (EventEmitter as new () => ArchiverEmitter)
+  implements ArchiveSource, L2BlockSink, Traceable
+{
+  /** A loop in which we will be continually fetching new checkpoints. */
   private runningPromise: RunningPromise;
 
   private rollup: RollupContract;
@@ -139,11 +165,15 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
   private initialSyncComplete: boolean = false;
   private initialSyncPromise: PromiseWithResolvers<void>;
 
+  /** Queue of blocks to be added to the store, processed by the sync loop. */
+  private blockQueue: AddBlockRequest[] = [];
+
   public readonly tracer: Tracer;
 
   /**
    * Creates a new instance of the Archiver.
    * @param publicClient - A client for interacting with the Ethereum node.
+   * @param debugClient - A client for interacting with the Ethereum node for debug/trace methods.
    * @param rollupAddress - Ethereum address of the rollup contract.
    * @param inboxAddress - Ethereum address of the inbox contract.
    * @param registryAddress - Ethereum address of the registry contract.
@@ -153,15 +183,20 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
    */
   constructor(
     private readonly publicClient: ViemPublicClient,
-    private readonly l1Addresses: { rollupAddress: EthAddress; inboxAddress: EthAddress; registryAddress: EthAddress },
+    private readonly debugClient: ViemPublicDebugClient,
+    private readonly l1Addresses: Pick<
+      L1ContractAddresses,
+      'rollupAddress' | 'inboxAddress' | 'registryAddress' | 'governanceProposerAddress' | 'slashFactoryAddress'
+    > & { slashingProposerAddress: EthAddress },
     readonly dataStore: ArchiverDataStore,
     private config: {
       pollingIntervalMs: number;
       batchSize: number;
       skipValidateBlockAttestations?: boolean;
       maxAllowedEthClientDriftSeconds: number;
+      ethereumAllowNoDebugHosts?: boolean;
     },
-    private readonly blobSinkClient: BlobSinkClientInterface,
+    private readonly blobClient: BlobClientInterface,
     private readonly epochCache: EpochCache,
     private readonly dateProvider: DateProvider,
     private readonly instrumentation: ArchiverInstrumentation,
@@ -203,18 +238,28 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     const chain = createEthereumChain(config.l1RpcUrls, config.l1ChainId);
     const publicClient = createPublicClient({
       chain: chain.chainInfo,
-      transport: fallback(config.l1RpcUrls.map(url => http(url))),
+      transport: fallback(config.l1RpcUrls.map(url => http(url, { batch: false }))),
       pollingInterval: config.viemPollingIntervalMS,
     });
 
+    // Create debug client using debug RPC URLs if available, otherwise fall back to regular RPC URLs
+    const debugRpcUrls = config.l1DebugRpcUrls.length > 0 ? config.l1DebugRpcUrls : config.l1RpcUrls;
+    const debugClient = createPublicClient({
+      chain: chain.chainInfo,
+      transport: fallback(debugRpcUrls.map(url => http(url, { batch: false }))),
+      pollingInterval: config.viemPollingIntervalMS,
+    }) as ViemPublicDebugClient;
+
     const rollup = new RollupContract(publicClient, config.l1Contracts.rollupAddress);
 
-    const [l1StartBlock, l1GenesisTime, proofSubmissionEpochs, genesisArchiveRoot] = await Promise.all([
-      rollup.getL1StartBlock(),
-      rollup.getL1GenesisTime(),
-      rollup.getProofSubmissionEpochs(),
-      rollup.getGenesisArchiveTreeRoot(),
-    ] as const);
+    const [l1StartBlock, l1GenesisTime, proofSubmissionEpochs, genesisArchiveRoot, slashingProposerAddress] =
+      await Promise.all([
+        rollup.getL1StartBlock(),
+        rollup.getL1GenesisTime(),
+        rollup.getProofSubmissionEpochs(),
+        rollup.getGenesisArchiveTreeRoot(),
+        rollup.getSlashingProposerAddress(),
+      ] as const);
 
     const l1StartBlockHash = await publicClient
       .getBlock({ blockNumber: l1StartBlock, includeTransactions: false })
@@ -234,7 +279,12 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     };
 
     const opts = merge(
-      { pollingIntervalMs: 10_000, batchSize: 100, maxAllowedEthClientDriftSeconds: 300 },
+      {
+        pollingIntervalMs: 10_000,
+        batchSize: 100,
+        maxAllowedEthClientDriftSeconds: 300,
+        ethereumAllowNoDebugHosts: false,
+      },
       mapArchiverConfig(config),
     );
 
@@ -243,10 +293,11 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
 
     const archiver = new Archiver(
       publicClient,
-      config.l1Contracts,
+      debugClient,
+      { ...config.l1Contracts, slashingProposerAddress },
       archiverStore,
       opts,
-      deps.blobSinkClient,
+      deps.blobClient,
       epochCache,
       deps.dateProvider ?? new DateProvider(),
       await ArchiverInstrumentation.new(telemetry, () => archiverStore.estimateSize()),
@@ -270,16 +321,17 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
       throw new Error('Archiver is already running');
     }
 
-    await this.blobSinkClient.testSources();
+    await this.blobClient.testSources();
     await this.testEthereumNodeSynced();
+    await validateAndLogTraceAvailability(this.debugClient, this.config.ethereumAllowNoDebugHosts ?? false);
 
     // Log initial state for the archiver
     const { l1StartBlock } = this.l1constants;
     const { blocksSynchedTo = l1StartBlock, messagesSynchedTo = l1StartBlock } = await this.store.getSynchPoint();
-    const currentL2Block = await this.getBlockNumber();
+    const currentL2Checkpoint = await this.getSynchedCheckpointNumber();
     this.log.info(
-      `Starting archiver sync to rollup contract ${this.l1Addresses.rollupAddress.toString()} from L1 block ${blocksSynchedTo} and L2 block ${currentL2Block}`,
-      { blocksSynchedTo, messagesSynchedTo, currentL2Block },
+      `Starting archiver sync to rollup contract ${this.l1Addresses.rollupAddress.toString()} from L1 block ${blocksSynchedTo} and L2 checkpoint ${currentL2Checkpoint}`,
+      { blocksSynchedTo, messagesSynchedTo, currentL2Checkpoint },
     );
 
     // Start sync loop, and return the wait for initial sync if we are asked to block until synced
@@ -291,6 +343,51 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
 
   public syncImmediate() {
     return this.runningPromise.trigger();
+  }
+
+  /**
+   * Queues a block to be added to the archiver store and triggers processing.
+   * The block will be processed by the sync loop.
+   * Implements the L2BlockSink interface.
+   * @param block - The L2 block to add.
+   * @returns A promise that resolves when the block has been added to the store, or rejects on error.
+   */
+  public addBlock(block: L2BlockNew): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.blockQueue.push({ block, resolve, reject });
+      this.log.debug(`Queued block ${block.number} for processing`);
+      // Trigger an immediate sync, but don't wait for it - the promise resolves when the block is processed
+      this.syncImmediate().catch(err => {
+        this.log.error(`Sync immediate call failed: ${err}`);
+      });
+    });
+  }
+
+  /**
+   * Processes all queued blocks, adding them to the store.
+   * Called at the beginning of each sync iteration.
+   * Blocks are processed in the order they were queued.
+   */
+  private async processQueuedBlocks(): Promise<void> {
+    if (this.blockQueue.length === 0) {
+      return;
+    }
+
+    // Take all blocks from the queue
+    const queuedItems = this.blockQueue.splice(0, this.blockQueue.length);
+    this.log.debug(`Processing ${queuedItems.length} queued block(s)`);
+
+    // Process each block individually to properly resolve/reject each promise
+    for (const { block, resolve, reject } of queuedItems) {
+      try {
+        await this.store.addBlocks([block]);
+        this.log.debug(`Added block ${block.number} to store`);
+        resolve();
+      } catch (err: any) {
+        this.log.error(`Failed to add block ${block.number} to store: ${err.message}`);
+        reject(err);
+      }
+    }
   }
 
   public waitForInitialSync() {
@@ -312,11 +409,7 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     }
   }
 
-  /**
-   * Fetches logs from L1 contracts and processes them.
-   */
-  @trackSpan('Archiver.sync')
-  private async sync() {
+  private async syncFromL1() {
     /**
      * We keep track of three "pointers" to L1 blocks:
      * 1. the last L1 block that published an L2 block
@@ -382,35 +475,35 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
       );
     }
 
-    // ********** Events that are processed per L2 block **********
+    // ********** Events that are processed per checkpoint **********
     if (currentL1BlockNumber > blocksSynchedTo) {
-      // First we retrieve new L2 blocks and store them in the DB. This will also update the
-      // pending chain validation status, proven block number, and synched L1 block number.
-      const rollupStatus = await this.handleL2blocks(blocksSynchedTo, currentL1BlockNumber);
+      // First we retrieve new checkpoints and L2 blocks and store them in the DB. This will also update the
+      // pending chain validation status, proven checkpoint number, and synched L1 block number.
+      const rollupStatus = await this.handleCheckpoints(blocksSynchedTo, currentL1BlockNumber);
       // Then we prune the current epoch if it'd reorg on next submission.
-      // Note that we don't do this before retrieving L2 blocks because we may need to retrieve
-      // blocks from more than 2 epochs ago, so we want to make sure we have the latest view of
+      // Note that we don't do this before retrieving checkpoints because we may need to retrieve
+      // checkpoints from more than 2 epochs ago, so we want to make sure we have the latest view of
       // the chain locally before we start unwinding stuff. This can be optimized by figuring out
-      // up to which point we're pruning, and then requesting L2 blocks up to that point only.
+      // up to which point we're pruning, and then requesting checkpoints up to that point only.
       const { rollupCanPrune } = await this.handleEpochPrune(
-        rollupStatus.provenBlockNumber,
+        rollupStatus.provenCheckpointNumber,
         currentL1BlockNumber,
         currentL1Timestamp,
       );
 
-      // If the last block we processed had an invalid attestation, we manually advance the L1 syncpoint
+      // If the last checkpoint we processed had an invalid attestation, we manually advance the L1 syncpoint
       // past it, since otherwise we'll keep downloading it and reprocessing it on every iteration until
-      // we get a valid block to advance the syncpoint.
-      if (!rollupStatus.validationResult?.valid && rollupStatus.lastL1BlockWithL2Blocks !== undefined) {
-        await this.store.setBlockSynchedL1BlockNumber(rollupStatus.lastL1BlockWithL2Blocks);
+      // we get a valid checkpoint to advance the syncpoint.
+      if (!rollupStatus.validationResult?.valid && rollupStatus.lastL1BlockWithCheckpoint !== undefined) {
+        await this.store.setCheckpointSynchedL1BlockNumber(rollupStatus.lastL1BlockWithCheckpoint);
       }
 
-      // And lastly we check if we are missing any L2 blocks behind us due to a possible L1 reorg.
+      // And lastly we check if we are missing any checkpoints behind us due to a possible L1 reorg.
       // We only do this if rollup cant prune on the next submission. Otherwise we will end up
-      // re-syncing the blocks we have just unwound above. We also dont do this if the last block is invalid,
+      // re-syncing the checkpoints we have just unwound above. We also dont do this if the last checkpoint is invalid,
       // since the archiver will rightfully refuse to sync up to it.
       if (!rollupCanPrune && rollupStatus.validationResult?.valid) {
-        await this.checkForNewBlocksBeforeL1SyncPoint(rollupStatus, blocksSynchedTo, currentL1BlockNumber);
+        await this.checkForNewCheckpointsBeforeL1SyncPoint(rollupStatus, blocksSynchedTo, currentL1BlockNumber);
       }
 
       this.instrumentation.updateL1BlockHeight(currentL1BlockNumber);
@@ -436,6 +529,17 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     }
   }
 
+  /**
+   * Fetches logs from L1 contracts and processes them.
+   */
+  @trackSpan('Archiver.sync')
+  private async sync() {
+    // Process any queued blocks first, before doing L1 sync
+    await this.processQueuedBlocks();
+    // Now perform L1 sync
+    await this.syncFromL1();
+  }
+
   /** Queries the rollup contract on whether a prune can be executed on the immediate next L1 block. */
   private async canPrune(currentL1BlockNumber: bigint, currentL1Timestamp: bigint) {
     const time = (currentL1Timestamp ?? 0n) + BigInt(this.l1constants.ethereumSlotDuration);
@@ -450,27 +554,44 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     return result;
   }
 
-  /** Checks if there'd be a reorg for the next block submission and start pruning now. */
-  private async handleEpochPrune(provenBlockNumber: number, currentL1BlockNumber: bigint, currentL1Timestamp: bigint) {
+  /** Checks if there'd be a reorg for the next checkpoint submission and start pruning now. */
+  private async handleEpochPrune(
+    provenCheckpointNumber: CheckpointNumber,
+    currentL1BlockNumber: bigint,
+    currentL1Timestamp: bigint,
+  ) {
     const rollupCanPrune = await this.canPrune(currentL1BlockNumber, currentL1Timestamp);
-    const localPendingBlockNumber = await this.getBlockNumber();
-    const canPrune = localPendingBlockNumber > provenBlockNumber && rollupCanPrune;
+    const localPendingCheckpointNumber = await this.getSynchedCheckpointNumber();
+    const canPrune = localPendingCheckpointNumber > provenCheckpointNumber && rollupCanPrune;
 
     if (canPrune) {
       const timer = new Timer();
-      const pruneFrom = provenBlockNumber + 1;
+      const pruneFrom = CheckpointNumber(provenCheckpointNumber + 1);
 
-      const header = await this.getBlockHeader(Number(pruneFrom));
+      const header = await this.getCheckpointHeader(pruneFrom);
       if (header === undefined) {
-        throw new Error(`Missing block header ${pruneFrom}`);
+        throw new Error(`Missing checkpoint header ${pruneFrom}`);
       }
 
-      const pruneFromSlotNumber = header.globalVariables.slotNumber.toBigInt();
-      const pruneFromEpochNumber = getEpochAtSlot(pruneFromSlotNumber, this.l1constants);
+      const pruneFromSlotNumber = header.slotNumber;
+      const pruneFromEpochNumber: EpochNumber = getEpochAtSlot(pruneFromSlotNumber, this.l1constants);
 
-      const blocksToUnwind = localPendingBlockNumber - provenBlockNumber;
+      const checkpointsToUnwind = localPendingCheckpointNumber - provenCheckpointNumber;
 
-      const blocks = await this.getBlocks(Number(provenBlockNumber) + 1, Number(blocksToUnwind));
+      const checkpointPromises = Array.from({ length: checkpointsToUnwind })
+        .fill(0)
+        .map((_, i) => this.store.getCheckpointData(CheckpointNumber(i + pruneFrom)));
+      const checkpoints = await Promise.all(checkpointPromises);
+
+      const blockPromises = await Promise.all(
+        checkpoints
+          .filter(isDefined)
+          .map(cp => this.store.getBlocksForCheckpoint(CheckpointNumber(cp.checkpointNumber))),
+      );
+      const newBlocks = blockPromises.filter(isDefined).flat();
+
+      // TODO(pw/mbps): Don't convert to legacy blocks here
+      const blocks: L2Block[] = (await Promise.all(newBlocks.map(x => this.getBlock(x.number)))).filter(isDefined);
 
       // Emit an event for listening services to react to the chain prune
       this.emit(L2BlockSourceEvents.L2PruneDetected, {
@@ -480,13 +601,13 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
       });
 
       this.log.debug(
-        `L2 prune from ${provenBlockNumber + 1} to ${localPendingBlockNumber} will occur on next block submission.`,
+        `L2 prune from ${provenCheckpointNumber + 1} to ${localPendingCheckpointNumber} will occur on next checkpoint submission.`,
       );
-      await this.store.unwindBlocks(Number(localPendingBlockNumber), Number(blocksToUnwind));
+      await this.unwindCheckpoints(localPendingCheckpointNumber, checkpointsToUnwind);
       this.log.warn(
-        `Unwound ${count(blocksToUnwind, 'block')} from L2 block ${localPendingBlockNumber} ` +
-          `to ${provenBlockNumber} due to predicted reorg at L1 block ${currentL1BlockNumber}. ` +
-          `Updated L2 latest block is ${await this.getBlockNumber()}.`,
+        `Unwound ${count(checkpointsToUnwind, 'checkpoint')} from checkpoint ${localPendingCheckpointNumber} ` +
+          `to ${provenCheckpointNumber} due to predicted reorg at L1 block ${currentL1BlockNumber}. ` +
+          `Updated latest checkpoint is ${await this.getSynchedCheckpointNumber()}.`,
       );
       this.instrumentation.processPrune(timer.ms());
       // TODO(palla/reorg): Do we need to set the block synched L1 block number here?
@@ -587,7 +708,7 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     // Log stats for messages retrieved (if any).
     if (messageCount > 0) {
       this.log.info(
-        `Retrieved ${messageCount} new L1 to L2 messages up to message with index ${lastMessage?.index} for L2 block ${lastMessage?.l2BlockNumber}`,
+        `Retrieved ${messageCount} new L1 to L2 messages up to message with index ${lastMessage?.index} for checkpoint ${lastMessage?.checkpointNumber}`,
         { lastMessage, messageCount },
       );
     }
@@ -665,204 +786,230 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     return Buffer32.fromString(block.hash);
   }
 
-  private async handleL2blocks(blocksSynchedTo: bigint, currentL1BlockNumber: bigint): Promise<RollupStatus> {
-    const localPendingBlockNumber = await this.getBlockNumber();
+  private async handleCheckpoints(blocksSynchedTo: bigint, currentL1BlockNumber: bigint): Promise<RollupStatus> {
+    const localPendingCheckpointNumber = await this.getSynchedCheckpointNumber();
     const initialValidationResult: ValidateBlockResult | undefined = await this.store.getPendingChainValidationStatus();
-    const [provenBlockNumber, provenArchive, pendingBlockNumber, pendingArchive, archiveForLocalPendingBlockNumber] =
-      await this.rollup.status(BigInt(localPendingBlockNumber), { blockNumber: currentL1BlockNumber });
-    const rollupStatus = {
-      provenBlockNumber: Number(provenBlockNumber),
+    const [
+      rollupProvenCheckpointNumber,
       provenArchive,
-      pendingBlockNumber: Number(pendingBlockNumber),
+      rollupPendingCheckpointNumber,
+      pendingArchive,
+      archiveForLocalPendingCheckpointNumber,
+    ] = await this.rollup.status(localPendingCheckpointNumber, { blockNumber: currentL1BlockNumber });
+    const provenCheckpointNumber = CheckpointNumber.fromBigInt(rollupProvenCheckpointNumber);
+    const pendingCheckpointNumber = CheckpointNumber.fromBigInt(rollupPendingCheckpointNumber);
+    const rollupStatus = {
+      provenCheckpointNumber,
+      provenArchive,
+      pendingCheckpointNumber,
       pendingArchive,
       validationResult: initialValidationResult,
     };
     this.log.trace(`Retrieved rollup status at current L1 block ${currentL1BlockNumber}.`, {
-      localPendingBlockNumber,
+      localPendingCheckpointNumber,
       blocksSynchedTo,
       currentL1BlockNumber,
-      archiveForLocalPendingBlockNumber,
+      archiveForLocalPendingCheckpointNumber,
       ...rollupStatus,
     });
 
-    const updateProvenBlock = async () => {
-      // Annoying edge case: if proven block is moved back to 0 due to a reorg at the beginning of the chain,
-      // we need to set it to zero. This is an edge case because we dont have a block zero (initial block is one),
-      // so localBlockForDestinationProvenBlockNumber would not be found below.
-      if (provenBlockNumber === 0n) {
-        const localProvenBlockNumber = await this.store.getProvenL2BlockNumber();
-        if (localProvenBlockNumber !== Number(provenBlockNumber)) {
-          await this.store.setProvenL2BlockNumber(Number(provenBlockNumber));
-          this.log.info(`Rolled back proven chain to block ${provenBlockNumber}`, { provenBlockNumber });
+    const updateProvenCheckpoint = async () => {
+      // Annoying edge case: if proven checkpoint is moved back to 0 due to a reorg at the beginning of the chain,
+      // we need to set it to zero. This is an edge case because we dont have a checkpoint zero (initial checkpoint is one),
+      // so localCheckpointForDestinationProvenCheckpointNumber would not be found below.
+      if (provenCheckpointNumber === 0) {
+        const localProvenCheckpointNumber = await this.getProvenCheckpointNumber();
+        if (localProvenCheckpointNumber !== provenCheckpointNumber) {
+          await this.setProvenCheckpointNumber(provenCheckpointNumber);
+          this.log.info(`Rolled back proven chain to checkpoint ${provenCheckpointNumber}`, { provenCheckpointNumber });
         }
       }
 
-      const localBlockForDestinationProvenBlockNumber = await this.getBlock(Number(provenBlockNumber));
+      const localCheckpointForDestinationProvenCheckpointNumber =
+        await this.store.getCheckpointData(provenCheckpointNumber);
 
-      // Sanity check. I've hit what seems to be a state where the proven block is set to a value greater than the latest
-      // synched block when requesting L2Tips from the archiver. This is the only place where the proven block is set.
-      const synched = await this.store.getSynchedL2BlockNumber();
-      if (localBlockForDestinationProvenBlockNumber && synched < localBlockForDestinationProvenBlockNumber?.number) {
+      // Sanity check. I've hit what seems to be a state where the proven checkpoint is set to a value greater than the latest
+      // synched checkpoint when requesting L2Tips from the archiver. This is the only place where the proven checkpoint is set.
+      const synched = await this.getSynchedCheckpointNumber();
+      if (
+        localCheckpointForDestinationProvenCheckpointNumber &&
+        synched < localCheckpointForDestinationProvenCheckpointNumber.checkpointNumber
+      ) {
         this.log.error(
-          `Hit local block greater than last synched block: ${localBlockForDestinationProvenBlockNumber.number} > ${synched}`,
+          `Hit local checkpoint greater than last synched checkpoint: ${localCheckpointForDestinationProvenCheckpointNumber.checkpointNumber} > ${synched}`,
         );
       }
 
       this.log.trace(
-        `Local block for remote proven block ${provenBlockNumber} is ${
-          localBlockForDestinationProvenBlockNumber?.archive.root.toString() ?? 'undefined'
+        `Local checkpoint for remote proven checkpoint ${provenCheckpointNumber} is ${
+          localCheckpointForDestinationProvenCheckpointNumber?.archive.root.toString() ?? 'undefined'
         }`,
       );
 
       if (
-        localBlockForDestinationProvenBlockNumber &&
-        provenArchive === localBlockForDestinationProvenBlockNumber.archive.root.toString()
+        localCheckpointForDestinationProvenCheckpointNumber &&
+        provenArchive === localCheckpointForDestinationProvenCheckpointNumber.archive.root.toString()
       ) {
-        const localProvenBlockNumber = await this.store.getProvenL2BlockNumber();
-        if (localProvenBlockNumber !== Number(provenBlockNumber)) {
-          await this.store.setProvenL2BlockNumber(Number(provenBlockNumber));
-          this.log.info(`Updated proven chain to block ${provenBlockNumber}`, {
-            provenBlockNumber,
+        const localProvenCheckpointNumber = await this.getProvenCheckpointNumber();
+        if (localProvenCheckpointNumber !== provenCheckpointNumber) {
+          await this.setProvenCheckpointNumber(provenCheckpointNumber);
+          this.log.info(`Updated proven chain to checkpoint ${provenCheckpointNumber}`, {
+            provenCheckpointNumber,
           });
-          const provenSlotNumber =
-            localBlockForDestinationProvenBlockNumber.header.globalVariables.slotNumber.toBigInt();
-          const provenEpochNumber = getEpochAtSlot(provenSlotNumber, this.l1constants);
+          const provenSlotNumber = localCheckpointForDestinationProvenCheckpointNumber.header.slotNumber;
+          const provenEpochNumber: EpochNumber = getEpochAtSlot(provenSlotNumber, this.l1constants);
+          const lastBlockNumberInCheckpoint =
+            localCheckpointForDestinationProvenCheckpointNumber.startBlock +
+            localCheckpointForDestinationProvenCheckpointNumber.numBlocks -
+            1;
+
           this.emit(L2BlockSourceEvents.L2BlockProven, {
             type: L2BlockSourceEvents.L2BlockProven,
-            blockNumber: provenBlockNumber,
+            blockNumber: BlockNumber(lastBlockNumberInCheckpoint),
             slotNumber: provenSlotNumber,
             epochNumber: provenEpochNumber,
           });
+          this.instrumentation.updateLastProvenBlock(lastBlockNumberInCheckpoint);
         } else {
-          this.log.trace(`Proven block ${provenBlockNumber} already stored.`);
+          this.log.trace(`Proven checkpoint ${provenCheckpointNumber} already stored.`);
         }
       }
-      this.instrumentation.updateLastProvenBlock(Number(provenBlockNumber));
     };
 
-    // This is an edge case that we only hit if there are no proposed blocks.
-    // If we have 0 blocks locally and there are no blocks onchain there is nothing to do.
-    const noBlocks = localPendingBlockNumber === 0 && pendingBlockNumber === 0n;
-    if (noBlocks) {
-      await this.store.setBlockSynchedL1BlockNumber(currentL1BlockNumber);
+    // This is an edge case that we only hit if there are no proposed checkpoints.
+    // If we have 0 checkpoints locally and there are no checkpoints onchain there is nothing to do.
+    const noCheckpoints = localPendingCheckpointNumber === 0 && pendingCheckpointNumber === 0;
+    if (noCheckpoints) {
+      await this.store.setCheckpointSynchedL1BlockNumber(currentL1BlockNumber);
       this.log.debug(
-        `No blocks to retrieve from ${blocksSynchedTo + 1n} to ${currentL1BlockNumber}, no blocks on chain`,
+        `No checkpoints to retrieve from ${blocksSynchedTo + 1n} to ${currentL1BlockNumber}, no checkpoints on chain`,
       );
       return rollupStatus;
     }
 
-    await updateProvenBlock();
+    await updateProvenCheckpoint();
 
     // Related to the L2 reorgs of the pending chain. We are only interested in actually addressing a reorg if there
-    // are any state that could be impacted by it. If we have no blocks, there is no impact.
-    if (localPendingBlockNumber > 0) {
-      const localPendingBlock = await this.getBlock(localPendingBlockNumber);
-      if (localPendingBlock === undefined) {
-        throw new Error(`Missing block ${localPendingBlockNumber}`);
+    // are any state that could be impacted by it. If we have no checkpoints, there is no impact.
+    if (localPendingCheckpointNumber > 0) {
+      const localPendingCheckpoint = await this.store.getCheckpointData(localPendingCheckpointNumber);
+      if (localPendingCheckpoint === undefined) {
+        throw new Error(`Missing checkpoint ${localPendingCheckpointNumber}`);
       }
 
-      const localPendingArchiveRoot = localPendingBlock.archive.root.toString();
-      const noBlockSinceLast = localPendingBlock && pendingArchive === localPendingArchiveRoot;
-      if (noBlockSinceLast) {
+      const localPendingArchiveRoot = localPendingCheckpoint.archive.root.toString();
+      const noCheckpointSinceLast = localPendingCheckpoint && pendingArchive === localPendingArchiveRoot;
+      if (noCheckpointSinceLast) {
         // We believe the following line causes a problem when we encounter L1 re-orgs.
         // Basically, by setting the synched L1 block number here, we are saying that we have
-        // processed all blocks up to the current L1 block number and we will not attempt to retrieve logs from
+        // processed all checkpoints up to the current L1 block number and we will not attempt to retrieve logs from
         // this block again (or any blocks before).
-        // However, in the re-org scenario, our L1 node is temporarily lying to us and we end up potentially missing blocks
+        // However, in the re-org scenario, our L1 node is temporarily lying to us and we end up potentially missing checkpoints.
         // We must only set this block number based on actually retrieved logs.
         // TODO(#8621): Tackle this properly when we handle L1 Re-orgs.
         // await this.store.setBlockSynchedL1BlockNumber(currentL1BlockNumber);
-        this.log.debug(`No blocks to retrieve from ${blocksSynchedTo + 1n} to ${currentL1BlockNumber}`);
+        this.log.debug(`No checkpoints to retrieve from ${blocksSynchedTo + 1n} to ${currentL1BlockNumber}`);
         return rollupStatus;
       }
 
-      const localPendingBlockInChain = archiveForLocalPendingBlockNumber === localPendingArchiveRoot;
-      if (!localPendingBlockInChain) {
-        // If our local pending block tip is not in the chain on L1 a "prune" must have happened
+      const localPendingCheckpointInChain = archiveForLocalPendingCheckpointNumber === localPendingArchiveRoot;
+      if (!localPendingCheckpointInChain) {
+        // If our local pending checkpoint tip is not in the chain on L1 a "prune" must have happened
         // or the L1 have reorged.
         // In any case, we have to figure out how far into the past the action will take us.
-        // For simplicity here, we will simply rewind until we end in a block that is also on the chain on L1.
+        // For simplicity here, we will simply rewind until we end in a checkpoint that is also on the chain on L1.
         this.log.debug(
-          `L2 prune has been detected due to local pending block ${localPendingBlockNumber} not in chain`,
-          { localPendingBlockNumber, localPendingArchiveRoot, archiveForLocalPendingBlockNumber },
+          `L2 prune has been detected due to local pending checkpoint ${localPendingCheckpointNumber} not in chain`,
+          { localPendingCheckpointNumber, localPendingArchiveRoot, archiveForLocalPendingCheckpointNumber },
         );
 
-        let tipAfterUnwind = localPendingBlockNumber;
+        let tipAfterUnwind = localPendingCheckpointNumber;
         while (true) {
-          const candidateBlock = await this.getBlock(Number(tipAfterUnwind));
-          if (candidateBlock === undefined) {
+          const candidateCheckpoint = await this.store.getCheckpointData(tipAfterUnwind);
+          if (candidateCheckpoint === undefined) {
             break;
           }
 
-          const archiveAtContract = await this.rollup.archiveAt(BigInt(candidateBlock.number));
-          this.log.trace(`Checking local block ${candidateBlock.number} with archive ${candidateBlock.archive.root}`, {
-            archiveAtContract,
-            archiveLocal: candidateBlock.archive.root.toString(),
-          });
-          if (archiveAtContract === candidateBlock.archive.root.toString()) {
+          const archiveAtContract = await this.rollup.archiveAt(candidateCheckpoint.checkpointNumber);
+          this.log.trace(
+            `Checking local checkpoint ${candidateCheckpoint.checkpointNumber} with archive ${candidateCheckpoint.archive.root}`,
+            {
+              archiveAtContract,
+              archiveLocal: candidateCheckpoint.archive.root.toString(),
+            },
+          );
+          if (archiveAtContract === candidateCheckpoint.archive.root.toString()) {
             break;
           }
           tipAfterUnwind--;
         }
 
-        const blocksToUnwind = localPendingBlockNumber - tipAfterUnwind;
-        await this.store.unwindBlocks(Number(localPendingBlockNumber), Number(blocksToUnwind));
+        const checkpointsToUnwind = localPendingCheckpointNumber - tipAfterUnwind;
+        await this.unwindCheckpoints(localPendingCheckpointNumber, checkpointsToUnwind);
 
         this.log.warn(
-          `Unwound ${count(blocksToUnwind, 'block')} from L2 block ${localPendingBlockNumber} ` +
-            `due to mismatched block hashes at L1 block ${currentL1BlockNumber}. ` +
-            `Updated L2 latest block is ${await this.getBlockNumber()}.`,
+          `Unwound ${count(checkpointsToUnwind, 'checkpoint')} from checkpoint ${localPendingCheckpointNumber} ` +
+            `due to mismatched checkpoint hashes at L1 block ${currentL1BlockNumber}. ` +
+            `Updated L2 latest checkpoint is ${await this.getSynchedCheckpointNumber()}.`,
         );
       }
     }
 
-    // Retrieve L2 blocks in batches. Each batch is estimated to accommodate up to L2 'blockBatchSize' blocks,
+    // Retrieve checkpoints in batches. Each batch is estimated to accommodate up to 'blockBatchSize' L1 blocks,
     // computed using the L2 block time vs the L1 block time.
     let searchStartBlock: bigint = blocksSynchedTo;
     let searchEndBlock: bigint = blocksSynchedTo;
-    let lastRetrievedBlock: PublishedL2Block | undefined;
-    let lastL1BlockWithL2Blocks: bigint | undefined = undefined;
+    let lastRetrievedCheckpoint: PublishedCheckpoint | undefined;
+    let lastL1BlockWithCheckpoint: bigint | undefined = undefined;
 
     do {
       [searchStartBlock, searchEndBlock] = this.nextRange(searchEndBlock, currentL1BlockNumber);
 
-      this.log.trace(`Retrieving L2 blocks from L1 block ${searchStartBlock} to ${searchEndBlock}`);
+      this.log.trace(`Retrieving checkpoints from L1 block ${searchStartBlock} to ${searchEndBlock}`);
 
-      // TODO(md): Retrieve from blob sink then from consensus client, then from peers
-      const retrievedBlocks = await retrieveBlocksFromRollup(
+      // TODO(md): Retrieve from blob client then from consensus client, then from peers
+      const retrievedCheckpoints = await retrieveCheckpointsFromRollup(
         this.rollup.getContract() as GetContractReturnType<typeof RollupAbi, ViemPublicClient>,
         this.publicClient,
-        this.blobSinkClient,
+        this.debugClient,
+        this.blobClient,
         searchStartBlock, // TODO(palla/reorg): If the L2 reorg was due to an L1 reorg, we need to start search earlier
         searchEndBlock,
+        this.l1Addresses,
+        this.instrumentation,
         this.log,
+        !this.initialSyncComplete, // isHistoricalSync
       );
 
-      if (retrievedBlocks.length === 0) {
+      if (retrievedCheckpoints.length === 0) {
         // We are not calling `setBlockSynchedL1BlockNumber` because it may cause sync issues if based off infura.
         // See further details in earlier comments.
-        this.log.trace(`Retrieved no new L2 blocks from L1 block ${searchStartBlock} to ${searchEndBlock}`);
+        this.log.trace(`Retrieved no new checkpoints from L1 block ${searchStartBlock} to ${searchEndBlock}`);
         continue;
       }
 
       this.log.debug(
-        `Retrieved ${retrievedBlocks.length} new L2 blocks between L1 blocks ${searchStartBlock} and ${searchEndBlock}`,
-        { lastProcessedL1Block: retrievedBlocks[retrievedBlocks.length - 1].l1, searchStartBlock, searchEndBlock },
+        `Retrieved ${retrievedCheckpoints.length} new checkpoints between L1 blocks ${searchStartBlock} and ${searchEndBlock}`,
+        {
+          lastProcessedCheckpoint: retrievedCheckpoints[retrievedCheckpoints.length - 1].l1,
+          searchStartBlock,
+          searchEndBlock,
+        },
       );
 
-      const publishedBlocks = await Promise.all(retrievedBlocks.map(b => retrievedBlockToPublishedL2Block(b)));
-      const validBlocks: PublishedL2Block[] = [];
+      const publishedCheckpoints = await Promise.all(retrievedCheckpoints.map(b => retrievedToPublishedCheckpoint(b)));
+      const validCheckpoints: PublishedCheckpoint[] = [];
 
-      for (const block of publishedBlocks) {
+      for (const published of publishedCheckpoints) {
         const validationResult = this.config.skipValidateBlockAttestations
           ? { valid: true as const }
-          : await validateBlockAttestations(block, this.epochCache, this.l1constants, this.log);
+          : await validateCheckpointAttestations(published, this.epochCache, this.l1constants, this.log);
 
-        // Only update the validation result if it has changed, so we can keep track of the first invalid block
-        // in case there is a sequence of more than one invalid block, as we need to invalidate the first one.
-        // There is an exception though: if an invalid block is invalidated and replaced with another invalid block,
+        // Only update the validation result if it has changed, so we can keep track of the first invalid checkpoint
+        // in case there is a sequence of more than one invalid checkpoint, as we need to invalidate the first one.
+        // There is an exception though: if a checkpoint is invalidated and replaced with another invalid checkpoint,
         // we need to update the validation result, since we need to be able to invalidate the new one.
-        // See test 'chain progresses if an invalid block is invalidated with an invalid one' for more info.
+        // See test 'chain progresses if an invalid checkpoint is invalidated with an invalid one' for more info.
         if (
           rollupStatus.validationResult?.valid !== validationResult.valid ||
           (!rollupStatus.validationResult.valid &&
@@ -873,9 +1020,9 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
         }
 
         if (!validationResult.valid) {
-          this.log.warn(`Skipping block ${block.block.number} due to invalid attestations`, {
-            blockHash: block.block.hash(),
-            l1BlockNumber: block.l1.blockNumber,
+          this.log.warn(`Skipping checkpoint ${published.checkpoint.number} due to invalid attestations`, {
+            checkpointHash: published.checkpoint.hash(),
+            l1BlockNumber: published.l1.blockNumber,
             ...pick(validationResult, 'reason'),
           });
 
@@ -885,43 +1032,64 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
             validationResult,
           });
 
-          // We keep consuming blocks if we find an invalid one, since we do not listen for BlockInvalidated events
-          // We just pretend the invalid ones are not there and keep consuming the next blocks
-          // Note that this breaks if the committee ever attests to a descendant of an invalid block
+          // We keep consuming checkpoints if we find an invalid one, since we do not listen for CheckpointInvalidated events
+          // We just pretend the invalid ones are not there and keep consuming the next checkpoints
+          // Note that this breaks if the committee ever attests to a descendant of an invalid checkpoint
           continue;
         }
 
-        validBlocks.push(block);
-        this.log.debug(`Ingesting new L2 block ${block.block.number} with ${block.block.body.txEffects.length} txs`, {
-          blockHash: block.block.hash(),
-          l1BlockNumber: block.l1.blockNumber,
-          ...block.block.header.globalVariables.toInspect(),
-          ...block.block.getStats(),
-        });
+        // Check the inHash of the checkpoint against the l1->l2 messages.
+        // The messages should've been synced up to the currentL1BlockNumber and must be available for the published
+        // checkpoints we just retrieved.
+        const l1ToL2Messages = await this.getL1ToL2Messages(published.checkpoint.number);
+        const computedInHash = computeInHashFromL1ToL2Messages(l1ToL2Messages);
+        const publishedInHash = published.checkpoint.header.contentCommitment.inHash;
+        if (!computedInHash.equals(publishedInHash)) {
+          this.log.fatal(`Mismatch inHash for checkpoint ${published.checkpoint.number}`, {
+            checkpointHash: published.checkpoint.hash(),
+            l1BlockNumber: published.l1.blockNumber,
+            computedInHash,
+            publishedInHash,
+          });
+          // Throwing an error since this is most likely caused by a bug.
+          throw new Error(
+            `Mismatch inHash for checkpoint ${published.checkpoint.number}. Expected ${computedInHash} but got ${publishedInHash}`,
+          );
+        }
+
+        validCheckpoints.push(published);
+        this.log.debug(
+          `Ingesting new checkpoint ${published.checkpoint.number} with ${published.checkpoint.blocks.length} blocks`,
+          {
+            checkpointHash: published.checkpoint.hash(),
+            l1BlockNumber: published.l1.blockNumber,
+            ...published.checkpoint.header.toInspect(),
+            blocks: published.checkpoint.blocks.map(b => b.getStats()),
+          },
+        );
       }
 
       try {
         const updatedValidationResult =
           rollupStatus.validationResult === initialValidationResult ? undefined : rollupStatus.validationResult;
-        const [processDuration] = await elapsed(() => this.store.addBlocks(validBlocks, updatedValidationResult));
+        const [processDuration] = await elapsed(() => this.addCheckpoints(validCheckpoints, updatedValidationResult));
         this.instrumentation.processNewBlocks(
-          processDuration / validBlocks.length,
-          validBlocks.map(b => b.block),
+          processDuration / validCheckpoints.length,
+          validCheckpoints.flatMap(c => c.checkpoint.blocks),
         );
       } catch (err) {
-        if (err instanceof InitialBlockNumberNotSequentialError) {
-          const { previousBlockNumber, newBlockNumber } = err;
-          const previousBlock = previousBlockNumber
-            ? await this.store.getPublishedBlock(previousBlockNumber)
+        if (err instanceof InitialCheckpointNumberNotSequentialError) {
+          const { previousCheckpointNumber, newCheckpointNumber } = err;
+          const previousCheckpoint = previousCheckpointNumber
+            ? await this.store.getCheckpointData(CheckpointNumber(previousCheckpointNumber))
             : undefined;
-          const updatedL1SyncPoint = previousBlock?.l1.blockNumber ?? this.l1constants.l1StartBlock;
+          const updatedL1SyncPoint = previousCheckpoint?.l1.blockNumber ?? this.l1constants.l1StartBlock;
           await this.store.setBlockSynchedL1BlockNumber(updatedL1SyncPoint);
           this.log.warn(
-            `Attempting to insert block ${newBlockNumber} with previous block ${previousBlockNumber}. Rolling back L1 sync point to ${updatedL1SyncPoint} to try and fetch the missing blocks.`,
+            `Attempting to insert checkpoint ${newCheckpointNumber} with previous block ${previousCheckpointNumber}. Rolling back L1 sync point to ${updatedL1SyncPoint} to try and fetch the missing blocks.`,
             {
-              previousBlockNumber,
-              previousBlockHash: await previousBlock?.block.hash(),
-              newBlockNumber,
+              previousCheckpointNumber,
+              newCheckpointNumber,
               updatedL1SyncPoint,
             },
           );
@@ -929,57 +1097,59 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
         throw err;
       }
 
-      for (const block of validBlocks) {
-        this.log.info(`Downloaded L2 block ${block.block.number}`, {
-          blockHash: await block.block.hash(),
-          blockNumber: block.block.number,
-          txCount: block.block.body.txEffects.length,
-          globalVariables: block.block.header.globalVariables.toInspect(),
-          archiveRoot: block.block.archive.root.toString(),
-          archiveNextLeafIndex: block.block.archive.nextAvailableLeafIndex,
+      for (const checkpoint of validCheckpoints) {
+        this.log.info(`Downloaded checkpoint ${checkpoint.checkpoint.number}`, {
+          checkpointHash: checkpoint.checkpoint.hash(),
+          checkpointNumber: checkpoint.checkpoint.number,
+          blockCount: checkpoint.checkpoint.blocks.length,
+          txCount: checkpoint.checkpoint.blocks.reduce((acc, b) => acc + b.body.txEffects.length, 0),
+          header: checkpoint.checkpoint.header.toInspect(),
+          archiveRoot: checkpoint.checkpoint.archive.root.toString(),
+          archiveNextLeafIndex: checkpoint.checkpoint.archive.nextAvailableLeafIndex,
         });
       }
-      lastRetrievedBlock = validBlocks.at(-1) ?? lastRetrievedBlock;
-      lastL1BlockWithL2Blocks = publishedBlocks.at(-1)?.l1.blockNumber ?? lastL1BlockWithL2Blocks;
+      lastRetrievedCheckpoint = validCheckpoints.at(-1) ?? lastRetrievedCheckpoint;
+      lastL1BlockWithCheckpoint = retrievedCheckpoints.at(-1)?.l1.blockNumber ?? lastL1BlockWithCheckpoint;
     } while (searchEndBlock < currentL1BlockNumber);
 
     // Important that we update AFTER inserting the blocks.
-    await updateProvenBlock();
+    await updateProvenCheckpoint();
 
-    return { ...rollupStatus, lastRetrievedBlock, lastL1BlockWithL2Blocks };
+    return { ...rollupStatus, lastRetrievedCheckpoint, lastL1BlockWithCheckpoint };
   }
 
-  private async checkForNewBlocksBeforeL1SyncPoint(
-    status: {
-      lastRetrievedBlock?: PublishedL2Block;
-      pendingBlockNumber: number;
-    },
+  private async checkForNewCheckpointsBeforeL1SyncPoint(
+    status: RollupStatus,
     blocksSynchedTo: bigint,
     currentL1BlockNumber: bigint,
   ) {
-    const { lastRetrievedBlock, pendingBlockNumber } = status;
-    // Compare the last L2 block we have (either retrieved in this round or loaded from store) with what the
+    const { lastRetrievedCheckpoint, pendingCheckpointNumber } = status;
+    // Compare the last checkpoint we have (either retrieved in this round or loaded from store) with what the
     // rollup contract told us was the latest one (pinned at the currentL1BlockNumber).
-    const latestLocalL2BlockNumber = lastRetrievedBlock?.block.number ?? (await this.store.getSynchedL2BlockNumber());
-    if (latestLocalL2BlockNumber < pendingBlockNumber) {
+    const latestLocalCheckpointNumber =
+      lastRetrievedCheckpoint?.checkpoint.number ?? (await this.getSynchedCheckpointNumber());
+    if (latestLocalCheckpointNumber < pendingCheckpointNumber) {
       // Here we have consumed all logs until the `currentL1Block` we pinned at the beginning of the archiver loop,
-      // but still havent reached the pending block according to the call to the rollup contract.
-      // We suspect an L1 reorg that added blocks *behind* us. If that is the case, it must have happened between the
-      // last L2 block we saw and the current one, so we reset the last synched L1 block number. In the edge case we
-      // don't have one, we go back 2 L1 epochs, which is the deepest possible reorg (assuming Casper is working).
-      const latestLocalL2Block =
-        lastRetrievedBlock ??
-        (latestLocalL2BlockNumber > 0
-          ? await this.store.getPublishedBlocks(latestLocalL2BlockNumber, 1).then(([b]) => b)
-          : undefined);
-      const targetL1BlockNumber = latestLocalL2Block?.l1.blockNumber ?? maxBigint(currentL1BlockNumber - 64n, 0n);
-      const latestLocalL2BlockArchive = latestLocalL2Block?.block.archive.root.toString();
+      // but still haven't reached the pending checkpoint according to the call to the rollup contract.
+      // We suspect an L1 reorg that added checkpoints *behind* us. If that is the case, it must have happened between
+      // the last checkpoint we saw and the current one, so we reset the last synched L1 block number. In the edge case
+      // we don't have one, we go back 2 L1 epochs, which is the deepest possible reorg (assuming Casper is working).
+      let latestLocalCheckpointArchive: string | undefined = undefined;
+      let targetL1BlockNumber = maxBigint(currentL1BlockNumber - 64n, 0n);
+      if (lastRetrievedCheckpoint) {
+        latestLocalCheckpointArchive = lastRetrievedCheckpoint.checkpoint.archive.root.toString();
+        targetL1BlockNumber = lastRetrievedCheckpoint.l1.blockNumber;
+      } else if (latestLocalCheckpointNumber > 0) {
+        const checkpoint = await this.store.getRangeOfCheckpoints(latestLocalCheckpointNumber, 1).then(([c]) => c);
+        latestLocalCheckpointArchive = checkpoint.archive.root.toString();
+        targetL1BlockNumber = checkpoint.l1.blockNumber;
+      }
       this.log.warn(
-        `Failed to reach L2 block ${pendingBlockNumber} at ${currentL1BlockNumber} (latest is ${latestLocalL2BlockNumber}). ` +
+        `Failed to reach checkpoint ${pendingCheckpointNumber} at ${currentL1BlockNumber} (latest is ${latestLocalCheckpointNumber}). ` +
           `Rolling back last synched L1 block number to ${targetL1BlockNumber}.`,
         {
-          latestLocalL2BlockNumber,
-          latestLocalL2BlockArchive,
+          latestLocalCheckpointNumber,
+          latestLocalCheckpointArchive,
           blocksSynchedTo,
           currentL1BlockNumber,
           ...status,
@@ -987,9 +1157,9 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
       );
       await this.store.setBlockSynchedL1BlockNumber(targetL1BlockNumber);
     } else {
-      this.log.trace(`No new blocks behind L1 sync point to retrieve.`, {
-        latestLocalL2BlockNumber,
-        pendingBlockNumber,
+      this.log.trace(`No new checkpoints behind L1 sync point to retrieve.`, {
+        latestLocalCheckpointNumber,
+        pendingCheckpointNumber,
       });
     }
   }
@@ -1043,58 +1213,71 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     return Promise.resolve(this.l1Timestamp);
   }
 
-  public getL2SlotNumber(): Promise<bigint | undefined> {
+  public getL2SlotNumber(): Promise<SlotNumber | undefined> {
     return Promise.resolve(
       this.l1Timestamp === undefined ? undefined : getSlotAtTimestamp(this.l1Timestamp, this.l1constants),
     );
   }
 
-  public getL2EpochNumber(): Promise<bigint | undefined> {
+  public getL2EpochNumber(): Promise<EpochNumber | undefined> {
     return Promise.resolve(
       this.l1Timestamp === undefined ? undefined : getEpochNumberAtTimestamp(this.l1Timestamp, this.l1constants),
     );
   }
 
-  public async getBlocksForEpoch(epochNumber: bigint): Promise<L2Block[]> {
+  public async getBlocksForEpoch(epochNumber: EpochNumber): Promise<L2Block[]> {
     const [start, end] = getSlotRangeForEpoch(epochNumber, this.l1constants);
     const blocks: L2Block[] = [];
 
-    // Walk the list of blocks backwards and filter by slots matching the requested epoch.
-    // We'll typically ask for blocks for a very recent epoch, so we shouldn't need an index here.
-    let block = await this.getBlock(await this.store.getSynchedL2BlockNumber());
-    const slot = (b: L2Block) => b.header.globalVariables.slotNumber.toBigInt();
-    while (block && slot(block) >= start) {
-      if (slot(block) <= end) {
-        blocks.push(block);
+    // Walk the list of checkpoints backwards and filter by slots matching the requested epoch.
+    // We'll typically ask for checkpoints for a very recent epoch, so we shouldn't need an index here.
+    let checkpoint = await this.store.getCheckpointData(await this.store.getSynchedCheckpointNumber());
+    const slot = (b: CheckpointData) => b.header.slotNumber;
+    while (checkpoint && slot(checkpoint) >= start) {
+      if (slot(checkpoint) <= end) {
+        // push the blocks on backwards
+        const endBlock = checkpoint.startBlock + checkpoint.numBlocks - 1;
+        for (let i = endBlock; i >= checkpoint.startBlock; i--) {
+          const block = await this.getBlock(BlockNumber(i));
+          if (block) {
+            blocks.push(block);
+          }
+        }
       }
-      block = await this.getBlock(block.number - 1);
+      checkpoint = await this.store.getCheckpointData(CheckpointNumber(checkpoint.checkpointNumber - 1));
     }
 
     return blocks.reverse();
   }
 
-  public async getBlockHeadersForEpoch(epochNumber: bigint): Promise<BlockHeader[]> {
+  public async getBlockHeadersForEpoch(epochNumber: EpochNumber): Promise<BlockHeader[]> {
     const [start, end] = getSlotRangeForEpoch(epochNumber, this.l1constants);
     const blocks: BlockHeader[] = [];
 
-    // Walk the list of blocks backwards and filter by slots matching the requested epoch.
-    // We'll typically ask for blocks for a very recent epoch, so we shouldn't need an index here.
-    let number = await this.store.getSynchedL2BlockNumber();
-    let header = await this.getBlockHeader(number);
-    const slot = (b: BlockHeader) => b.globalVariables.slotNumber.toBigInt();
-    while (header && slot(header) >= start) {
-      if (slot(header) <= end) {
-        blocks.push(header);
+    // Walk the list of checkpoints backwards and filter by slots matching the requested epoch.
+    // We'll typically ask for checkpoints for a very recent epoch, so we shouldn't need an index here.
+    let checkpoint = await this.store.getCheckpointData(await this.store.getSynchedCheckpointNumber());
+    const slot = (b: CheckpointData) => b.header.slotNumber;
+    while (checkpoint && slot(checkpoint) >= start) {
+      if (slot(checkpoint) <= end) {
+        // push the blocks on backwards
+        const endBlock = checkpoint.startBlock + checkpoint.numBlocks - 1;
+        for (let i = endBlock; i >= checkpoint.startBlock; i--) {
+          const block = await this.getBlockHeader(BlockNumber(i));
+          if (block) {
+            blocks.push(block);
+          }
+        }
       }
-      header = await this.getBlockHeader(--number);
+      checkpoint = await this.store.getCheckpointData(CheckpointNumber(checkpoint.checkpointNumber - 1));
     }
     return blocks.reverse();
   }
 
-  public async isEpochComplete(epochNumber: bigint): Promise<boolean> {
+  public async isEpochComplete(epochNumber: EpochNumber): Promise<boolean> {
     // The epoch is complete if the current L2 block is the last one in the epoch (or later)
     const header = await this.getBlockHeader('latest');
-    const slot = header?.globalVariables.slotNumber.toBigInt();
+    const slot = header ? header.globalVariables.slotNumber : undefined;
     const [_startSlot, endSlot] = getSlotRangeForEpoch(epochNumber, this.l1constants);
     if (slot && slot >= endSlot) {
       return true;
@@ -1124,31 +1307,53 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     return this.initialSyncComplete;
   }
 
-  /**
-   * Gets up to `limit` amount of L2 blocks starting from `from`.
-   * @param from - Number of the first block to return (inclusive).
-   * @param limit - The number of blocks to return.
-   * @param proven - If true, only return blocks that have been proven.
-   * @returns The requested L2 blocks.
-   */
-  public getBlocks(from: number, limit: number, proven?: boolean): Promise<L2Block[]> {
-    return this.getPublishedBlocks(from, limit, proven).then(blocks => blocks.map(b => b.block));
+  public async getCheckpointHeader(number: CheckpointNumber | 'latest'): Promise<CheckpointHeader | undefined> {
+    if (number === 'latest') {
+      number = await this.getSynchedCheckpointNumber();
+    }
+    if (number === 0) {
+      return undefined;
+    }
+    const checkpoint = await this.store.getCheckpointData(number);
+    if (!checkpoint) {
+      return undefined;
+    }
+    return checkpoint.header;
   }
 
-  /** Equivalent to getBlocks but includes publish data. */
-  public async getPublishedBlocks(from: number, limit: number, proven?: boolean): Promise<PublishedL2Block[]> {
-    const limitWithProven = proven
-      ? Math.min(limit, Math.max((await this.store.getProvenL2BlockNumber()) - from + 1, 0))
-      : limit;
-    return limitWithProven === 0 ? [] : await this.store.getPublishedBlocks(from, limitWithProven);
+  public getCheckpointNumber(): Promise<CheckpointNumber> {
+    return this.getSynchedCheckpointNumber();
   }
 
-  public getPublishedBlockByHash(blockHash: Fr): Promise<PublishedL2Block | undefined> {
-    return this.store.getPublishedBlockByHash(blockHash);
+  public getSynchedCheckpointNumber(): Promise<CheckpointNumber> {
+    return this.store.getSynchedCheckpointNumber();
   }
 
-  public getPublishedBlockByArchive(archive: Fr): Promise<PublishedL2Block | undefined> {
-    return this.store.getPublishedBlockByArchive(archive);
+  public getProvenCheckpointNumber(): Promise<CheckpointNumber> {
+    return this.store.getProvenCheckpointNumber();
+  }
+
+  public setProvenCheckpointNumber(checkpointNumber: CheckpointNumber): Promise<void> {
+    return this.store.setProvenCheckpointNumber(checkpointNumber);
+  }
+
+  public unwindCheckpoints(from: CheckpointNumber, checkpointsToUnwind: number): Promise<boolean> {
+    return this.store.unwindCheckpoints(from, checkpointsToUnwind);
+  }
+
+  public async getLastBlockNumberInCheckpoint(checkpointNumber: CheckpointNumber): Promise<BlockNumber | undefined> {
+    const checkpointData = await this.store.getCheckpointData(checkpointNumber);
+    if (!checkpointData) {
+      return undefined;
+    }
+    return BlockNumber(checkpointData.startBlock + checkpointData.numBlocks - 1);
+  }
+
+  public addCheckpoints(
+    checkpoints: PublishedCheckpoint[],
+    pendingChainValidationStatus?: ValidateBlockResult,
+  ): Promise<boolean> {
+    return this.store.addCheckpoints(checkpoints, pendingChainValidationStatus);
   }
 
   public getBlockHeaderByHash(blockHash: Fr): Promise<BlockHeader | undefined> {
@@ -1164,7 +1369,7 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
    * @param number - The block number to return.
    * @returns The requested L2 block.
    */
-  public async getBlock(number: number): Promise<L2Block | undefined> {
+  public async getL2BlockNew(number: BlockNumber): Promise<L2BlockNew | undefined> {
     // If the number provided is -ve, then return the latest block.
     if (number < 0) {
       number = await this.store.getSynchedL2BlockNumber();
@@ -1172,11 +1377,11 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     if (number === 0) {
       return undefined;
     }
-    const publishedBlock = await this.store.getPublishedBlock(number);
-    return publishedBlock?.block;
+    const publishedBlock = await this.store.store.getBlock(number);
+    return publishedBlock;
   }
 
-  public async getBlockHeader(number: number | 'latest'): Promise<BlockHeader | undefined> {
+  public async getBlockHeader(number: BlockNumber | 'latest'): Promise<BlockHeader | undefined> {
     if (number === 'latest') {
       number = await this.store.getSynchedL2BlockNumber();
     }
@@ -1187,6 +1392,21 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     return headers.length === 0 ? undefined : headers[0];
   }
 
+  getCheckpointedBlock(number: BlockNumber): Promise<CheckpointedL2Block | undefined> {
+    return this.store.getCheckpointedBlock(number);
+  }
+
+  getCheckpointedBlockByHash(blockHash: Fr): Promise<CheckpointedL2Block | undefined> {
+    return this.store.getCheckpointedBlockByHash(blockHash);
+  }
+
+  getProvenBlockNumber(): Promise<BlockNumber> {
+    return this.store.getProvenBlockNumber();
+  }
+  getCheckpointedBlockByArchive(archive: Fr): Promise<CheckpointedL2Block | undefined> {
+    return this.store.getCheckpointedBlockByArchive(archive);
+  }
+
   public getTxEffect(txHash: TxHash) {
     return this.store.getTxEffect(txHash);
   }
@@ -1195,24 +1415,12 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     return this.store.getSettledTxReceipt(txHash);
   }
 
-  /**
-   * Retrieves all private logs from up to `limit` blocks, starting from the block number `from`.
-   * @param from - The block number from which to begin retrieving logs.
-   * @param limit - The maximum number of blocks to retrieve logs from.
-   * @returns An array of private logs from the specified range of blocks.
-   */
-  public getPrivateLogs(from: number, limit: number): Promise<PrivateLog[]> {
-    return this.store.getPrivateLogs(from, limit);
+  getPrivateLogsByTags(tags: SiloedTag[]): Promise<TxScopedL2Log[][]> {
+    return this.store.getPrivateLogsByTags(tags);
   }
 
-  /**
-   * Gets all logs that match any of the received tags (i.e. logs with their first field equal to a tag).
-   * @param tags - The tags to filter the logs by.
-   * @returns For each received tag, an array of matching logs is returned. An empty array implies no logs match
-   * that tag.
-   */
-  getLogsByTags(tags: Fr[]): Promise<TxScopedL2Log[][]> {
-    return this.store.getLogsByTags(tags);
+  getPublicLogsByTagsFromContract(contractAddress: AztecAddress, tags: Tag[]): Promise<TxScopedL2Log[][]> {
+    return this.store.getPublicLogsByTagsFromContract(contractAddress, tags);
   }
 
   /**
@@ -1235,19 +1443,11 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
 
   /**
    * Gets the number of the latest L2 block processed by the block source implementation.
+   * This includes both checkpointed and uncheckpointed blocks.
    * @returns The number of the latest L2 block processed by the block source implementation.
    */
-  public getBlockNumber(): Promise<number> {
-    return this.store.getSynchedL2BlockNumber();
-  }
-
-  public getProvenBlockNumber(): Promise<number> {
-    return this.store.getProvenL2BlockNumber();
-  }
-
-  /** Forcefully updates the last proven block number. Use for testing. */
-  public setProvenBlockNumber(blockNumber: number): Promise<void> {
-    return this.store.setProvenL2BlockNumber(blockNumber);
+  public getBlockNumber(): Promise<BlockNumber> {
+    return this.store.getLatestBlockNumber();
   }
 
   public getContractClass(id: Fr): Promise<ContractClassPublic | undefined> {
@@ -1275,12 +1475,12 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
   }
 
   /**
-   * Gets L1 to L2 message (to be) included in a given block.
-   * @param blockNumber - L2 block number to get messages for.
+   * Gets L1 to L2 message (to be) included in a given checkpoint.
+   * @param checkpointNumber - Checkpoint number to get messages for.
    * @returns The L1 to L2 messages/leaves of the messages subtree (throws if not found).
    */
-  getL1ToL2Messages(blockNumber: number): Promise<Fr[]> {
-    return this.store.getL1ToL2Messages(blockNumber);
+  getL1ToL2Messages(checkpointNumber: CheckpointNumber): Promise<Fr[]> {
+    return this.store.getL1ToL2Messages(checkpointNumber);
   }
 
   /**
@@ -1321,7 +1521,7 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
     // TODO(#13569): Compute proper finalized block number based on L1 finalized block.
     // We just force it 2 epochs worth of proven data for now.
     // NOTE: update end-to-end/src/e2e_epochs/epochs_empty_blocks.test.ts as that uses finalized blocks in computations
-    const finalizedBlockNumber = Math.max(provenBlockNumber - this.l1constants.epochDuration * 2, 0);
+    const finalizedBlockNumber = BlockNumber(Math.max(provenBlockNumber - this.l1constants.epochDuration * 2, 0));
 
     const [latestBlockHeader, provenBlockHeader, finalizedBlockHeader] = await Promise.all([
       latestBlockNumber > 0 ? this.getBlockHeader(latestBlockNumber) : undefined,
@@ -1345,58 +1545,194 @@ export class Archiver extends (EventEmitter as new () => ArchiverEmitter) implem
       );
     }
 
-    const latestBlockHeaderHash = await latestBlockHeader?.hash();
-    const provenBlockHeaderHash = await provenBlockHeader?.hash();
-    const finalizedBlockHeaderHash = await finalizedBlockHeader?.hash();
+    const latestBlockHeaderHash = (await latestBlockHeader?.hash()) ?? GENESIS_BLOCK_HEADER_HASH;
+    const provenBlockHeaderHash = (await provenBlockHeader?.hash()) ?? GENESIS_BLOCK_HEADER_HASH;
+    const finalizedBlockHeaderHash = (await finalizedBlockHeader?.hash()) ?? GENESIS_BLOCK_HEADER_HASH;
 
     return {
-      latest: {
-        number: latestBlockNumber,
-        hash: latestBlockHeaderHash?.toString(),
-      } as L2BlockId,
-      proven: {
-        number: provenBlockNumber,
-        hash: provenBlockHeaderHash?.toString(),
-      } as L2BlockId,
-      finalized: {
-        number: finalizedBlockNumber,
-        hash: finalizedBlockHeaderHash?.toString(),
-      } as L2BlockId,
+      latest: { number: latestBlockNumber, hash: latestBlockHeaderHash.toString() },
+      proven: { number: provenBlockNumber, hash: provenBlockHeaderHash.toString() },
+      finalized: { number: finalizedBlockNumber, hash: finalizedBlockHeaderHash.toString() },
     };
   }
 
-  public async rollbackTo(targetL2BlockNumber: number): Promise<void> {
+  public async rollbackTo(targetL2BlockNumber: BlockNumber): Promise<void> {
+    // TODO(pw/mbps): This still assumes 1 block per checkpoint
     const currentBlocks = await this.getL2Tips();
     const currentL2Block = currentBlocks.latest.number;
     const currentProvenBlock = currentBlocks.proven.number;
-    // const currentFinalizedBlock = currentBlocks.finalized.number;
 
     if (targetL2BlockNumber >= currentL2Block) {
       throw new Error(`Target L2 block ${targetL2BlockNumber} must be less than current L2 block ${currentL2Block}`);
     }
     const blocksToUnwind = currentL2Block - targetL2BlockNumber;
-    const targetL2Block = await this.store.getPublishedBlock(targetL2BlockNumber);
+    const targetL2Block = await this.store.getCheckpointedBlock(targetL2BlockNumber);
     if (!targetL2Block) {
       throw new Error(`Target L2 block ${targetL2BlockNumber} not found`);
     }
     const targetL1BlockNumber = targetL2Block.l1.blockNumber;
+    const targetCheckpointNumber = CheckpointNumber.fromBlockNumber(targetL2BlockNumber);
     const targetL1BlockHash = await this.getL1BlockHash(targetL1BlockNumber);
-    this.log.info(`Unwinding ${blocksToUnwind} blocks from L2 block ${currentL2Block}`);
-    await this.store.unwindBlocks(currentL2Block, blocksToUnwind);
-    this.log.info(`Unwinding L1 to L2 messages to ${targetL2BlockNumber}`);
-    await this.store.rollbackL1ToL2MessagesToL2Block(targetL2BlockNumber);
+    this.log.info(`Unwinding ${blocksToUnwind} checkpoints from L2 block ${currentL2Block}`);
+    await this.store.unwindCheckpoints(CheckpointNumber(currentL2Block), blocksToUnwind);
+    this.log.info(`Unwinding L1 to L2 messages to checkpoint ${targetCheckpointNumber}`);
+    await this.store.rollbackL1ToL2MessagesToCheckpoint(targetCheckpointNumber);
     this.log.info(`Setting L1 syncpoints to ${targetL1BlockNumber}`);
     await this.store.setBlockSynchedL1BlockNumber(targetL1BlockNumber);
     await this.store.setMessageSynchedL1Block({ l1BlockNumber: targetL1BlockNumber, l1BlockHash: targetL1BlockHash });
     if (targetL2BlockNumber < currentProvenBlock) {
       this.log.info(`Clearing proven L2 block number`);
-      await this.store.setProvenL2BlockNumber(0);
+      await this.store.setProvenCheckpointNumber(CheckpointNumber.ZERO);
     }
     // TODO(palla/reorg): Set the finalized block when we add support for it.
     // if (targetL2BlockNumber < currentFinalizedBlock) {
     //   this.log.info(`Clearing finalized L2 block number`);
     //   await this.store.setFinalizedL2BlockNumber(0);
     // }
+  }
+
+  public async getPublishedCheckpoints(
+    checkpointNumber: CheckpointNumber,
+    limit: number,
+  ): Promise<PublishedCheckpoint[]> {
+    const checkpoints = await this.store.getRangeOfCheckpoints(checkpointNumber, limit);
+    const blocks = (
+      await Promise.all(checkpoints.map(ch => this.store.getBlocksForCheckpoint(ch.checkpointNumber)))
+    ).filter(isDefined);
+
+    const fullCheckpoints: PublishedCheckpoint[] = [];
+    for (let i = 0; i < checkpoints.length; i++) {
+      const blocksForCheckpoint = blocks[i];
+      const checkpoint = checkpoints[i];
+      const fullCheckpoint = new Checkpoint(
+        checkpoint.archive,
+        checkpoint.header,
+        blocksForCheckpoint,
+        checkpoint.checkpointNumber,
+      );
+      const publishedCheckpoint = new PublishedCheckpoint(
+        fullCheckpoint,
+        checkpoint.l1,
+        checkpoint.attestations.map(x => CommitteeAttestation.fromBuffer(x)),
+      );
+      fullCheckpoints.push(publishedCheckpoint);
+    }
+    return fullCheckpoints;
+  }
+
+  public async getCheckpointsForEpoch(epochNumber: EpochNumber): Promise<Checkpoint[]> {
+    const [start, end] = getSlotRangeForEpoch(epochNumber, this.l1constants);
+    const checkpoints: Checkpoint[] = [];
+
+    // Walk the list of checkpoints backwards and filter by slots matching the requested epoch.
+    // We'll typically ask for checkpoints for a very recent epoch, so we shouldn't need an index here.
+    let checkpointData = await this.store.getCheckpointData(await this.store.getSynchedCheckpointNumber());
+    const slot = (b: CheckpointData) => b.header.slotNumber;
+    while (checkpointData && slot(checkpointData) >= start) {
+      if (slot(checkpointData) <= end) {
+        // push the checkpoints on backwards
+        const [checkpoint] = await this.getPublishedCheckpoints(checkpointData.checkpointNumber, 1);
+        checkpoints.push(checkpoint.checkpoint);
+      }
+      checkpointData = await this.store.getCheckpointData(CheckpointNumber(checkpointData.checkpointNumber - 1));
+    }
+
+    return checkpoints.reverse();
+  }
+
+  /* Legacy APIs */
+
+  public async getPublishedBlockByHash(blockHash: Fr): Promise<PublishedL2Block | undefined> {
+    const checkpointedBlock = await this.store.getCheckpointedBlockByHash(blockHash);
+    return this.buildOldBlockFromCheckpointedBlock(checkpointedBlock);
+  }
+  public async getPublishedBlockByArchive(archive: Fr): Promise<PublishedL2Block | undefined> {
+    const checkpointedBlock = await this.store.getCheckpointedBlockByArchive(archive);
+    return this.buildOldBlockFromCheckpointedBlock(checkpointedBlock);
+  }
+
+  /**
+   * Gets up to `limit` amount of L2 blocks starting from `from`.
+   * @param from - Number of the first block to return (inclusive).
+   * @param limit - The number of blocks to return.
+   * @param proven - If true, only return blocks that have been proven.
+   * @returns The requested L2 blocks.
+   */
+  public async getBlocks(from: BlockNumber, limit: number, proven?: boolean): Promise<L2Block[]> {
+    const publishedBlocks = await this.getPublishedBlocks(from, limit, proven);
+    return publishedBlocks.map(x => x.block);
+  }
+
+  public async getPublishedBlocks(from: BlockNumber, limit: number, proven?: boolean): Promise<PublishedL2Block[]> {
+    const checkpoints = await this.store.getRangeOfCheckpoints(CheckpointNumber(from), limit);
+    const provenCheckpointNumber = await this.getProvenCheckpointNumber();
+    const blocks = (
+      await Promise.all(checkpoints.map(ch => this.store.getBlocksForCheckpoint(ch.checkpointNumber)))
+    ).filter(isDefined);
+
+    const olbBlocks: PublishedL2Block[] = [];
+    for (let i = 0; i < checkpoints.length; i++) {
+      const blockForCheckpoint = blocks[i][0];
+      const checkpoint = checkpoints[i];
+      if (checkpoint.checkpointNumber > provenCheckpointNumber && proven === true) {
+        // this checkpointisn't proven and we only want proven
+        continue;
+      }
+      const oldCheckpoint = new Checkpoint(
+        blockForCheckpoint.archive,
+        checkpoint.header,
+        [blockForCheckpoint],
+        checkpoint.checkpointNumber,
+      );
+      const oldBlock = L2Block.fromCheckpoint(oldCheckpoint);
+      const publishedBlock = new PublishedL2Block(
+        oldBlock,
+        checkpoint.l1,
+        checkpoint.attestations.map(x => CommitteeAttestation.fromBuffer(x)),
+      );
+      olbBlocks.push(publishedBlock);
+    }
+    return olbBlocks;
+  }
+
+  private async buildOldBlockFromCheckpointedBlock(
+    checkpointedBlock: CheckpointedL2Block | undefined,
+  ): Promise<PublishedL2Block | undefined> {
+    if (!checkpointedBlock) {
+      return undefined;
+    }
+    const checkpoint = await this.store.getCheckpointData(checkpointedBlock.checkpointNumber);
+    if (!checkpoint) {
+      return checkpoint;
+    }
+    const fullCheckpoint = new Checkpoint(
+      checkpointedBlock?.block.archive,
+      checkpoint?.header,
+      [checkpointedBlock.block],
+      checkpoint.checkpointNumber,
+    );
+    const oldBlock = L2Block.fromCheckpoint(fullCheckpoint);
+    const published = new PublishedL2Block(
+      oldBlock,
+      checkpoint.l1,
+      checkpoint.attestations.map(x => CommitteeAttestation.fromBuffer(x)),
+    );
+    return published;
+  }
+
+  public async getBlock(number: BlockNumber): Promise<L2Block | undefined> {
+    // If the number provided is -ve, then return the latest block.
+    if (number < 0) {
+      number = await this.store.getSynchedL2BlockNumber();
+    }
+    if (number === 0) {
+      return undefined;
+    }
+    const publishedBlocks = await this.getPublishedBlocks(number, 1);
+    if (publishedBlocks.length === 0) {
+      return undefined;
+    }
+    return publishedBlocks[0].block;
   }
 }
 
@@ -1428,17 +1764,19 @@ export class ArchiverStoreHelper
       | 'close'
       | 'transactionAsync'
       | 'addBlocks'
+      | 'getBlock'
+      | 'getBlocks'
     >
 {
   #log = createLogger('archiver:block-helper');
 
-  constructor(protected readonly store: ArchiverDataStore) {}
+  constructor(public readonly store: ArchiverDataStore) {}
 
   /**
    * Extracts and stores contract classes out of ContractClassPublished events emitted by the class registry contract.
    * @param allLogs - All logs emitted in a bunch of blocks.
    */
-  async #updatePublishedContractClasses(allLogs: ContractClassLog[], blockNum: number, operation: Operation) {
+  async #updatePublishedContractClasses(allLogs: ContractClassLog[], blockNum: BlockNumber, operation: Operation) {
     const contractClassPublishedEvents = allLogs
       .filter(log => ContractClassPublishedEvent.isContractClassPublishedEvent(log))
       .map(log => ContractClassPublishedEvent.fromLog(log));
@@ -1463,7 +1801,7 @@ export class ArchiverStoreHelper
    * Extracts and stores contract instances out of ContractInstancePublished events emitted by the canonical deployer contract.
    * @param allLogs - All logs emitted in a bunch of blocks.
    */
-  async #updateDeployedContractInstances(allLogs: PrivateLog[], blockNum: number, operation: Operation) {
+  async #updateDeployedContractInstances(allLogs: PrivateLog[], blockNum: BlockNumber, operation: Operation) {
     const contractInstances = allLogs
       .filter(log => ContractInstancePublishedEvent.isContractInstancePublishedEvent(log))
       .map(log => ContractInstancePublishedEvent.fromLog(log))
@@ -1516,7 +1854,7 @@ export class ArchiverStoreHelper
    * @param _blockNum - The block number
    * @returns
    */
-  async #storeBroadcastedIndividualFunctions(allLogs: ContractClassLog[], _blockNum: number) {
+  async #storeBroadcastedIndividualFunctions(allLogs: ContractClassLog[], _blockNum: BlockNumber) {
     // Filter out private and utility function broadcast events
     const privateFnEvents = allLogs
       .filter(log => PrivateFunctionBroadcastedEvent.isPrivateFunctionBroadcastedEvent(log))
@@ -1570,7 +1908,23 @@ export class ArchiverStoreHelper
     return true;
   }
 
-  public addBlocks(blocks: PublishedL2Block[], pendingChainValidationStatus?: ValidateBlockResult): Promise<boolean> {
+  private async addBlockDataToDB(block: L2BlockNew) {
+    const contractClassLogs = block.body.txEffects.flatMap(txEffect => txEffect.contractClassLogs);
+    // ContractInstancePublished event logs are broadcast in privateLogs.
+    const privateLogs = block.body.txEffects.flatMap(txEffect => txEffect.privateLogs);
+    const publicLogs = block.body.txEffects.flatMap(txEffect => txEffect.publicLogs);
+
+    return (
+      await Promise.all([
+        this.#updatePublishedContractClasses(contractClassLogs, block.number, Operation.Store),
+        this.#updateDeployedContractInstances(privateLogs, block.number, Operation.Store),
+        this.#updateUpdatedContractInstances(publicLogs, block.header.globalVariables.timestamp, Operation.Store),
+        this.#storeBroadcastedIndividualFunctions(contractClassLogs, block.number),
+      ])
+    ).every(Boolean);
+  }
+
+  public addBlocks(blocks: L2BlockNew[], pendingChainValidationStatus?: ValidateBlockResult): Promise<boolean> {
     // Add the blocks to the store. Store will throw if the blocks are not in order, there are gaps,
     // or if the previous block is not in the store.
     return this.store.transactionAsync(async () => {
@@ -1580,25 +1934,10 @@ export class ArchiverStoreHelper
         // Update the pending chain validation status if provided
         pendingChainValidationStatus && this.store.setPendingChainValidationStatus(pendingChainValidationStatus),
         // Add any logs emitted during the retrieved blocks
-        this.store.addLogs(blocks.map(block => block.block)),
+        this.store.addLogs(blocks),
         // Unroll all logs emitted during the retrieved blocks and extract any contract classes and instances from them
-        ...blocks.map(async block => {
-          const contractClassLogs = block.block.body.txEffects.flatMap(txEffect => txEffect.contractClassLogs);
-          // ContractInstancePublished event logs are broadcast in privateLogs.
-          const privateLogs = block.block.body.txEffects.flatMap(txEffect => txEffect.privateLogs);
-          const publicLogs = block.block.body.txEffects.flatMap(txEffect => txEffect.publicLogs);
-          return (
-            await Promise.all([
-              this.#updatePublishedContractClasses(contractClassLogs, block.block.number, Operation.Store),
-              this.#updateDeployedContractInstances(privateLogs, block.block.number, Operation.Store),
-              this.#updateUpdatedContractInstances(
-                publicLogs,
-                block.block.header.globalVariables.timestamp,
-                Operation.Store,
-              ),
-              this.#storeBroadcastedIndividualFunctions(contractClassLogs, block.block.number),
-            ])
-          ).every(Boolean);
+        ...blocks.map(block => {
+          return this.addBlockDataToDB(block);
         }),
       ]);
 
@@ -1606,61 +1945,104 @@ export class ArchiverStoreHelper
     });
   }
 
-  public async unwindBlocks(from: number, blocksToUnwind: number): Promise<boolean> {
-    const last = await this.getSynchedL2BlockNumber();
-    if (from != last) {
-      throw new Error(`Cannot unwind blocks from block ${from} when the last block is ${last}`);
-    }
-    if (blocksToUnwind <= 0) {
-      throw new Error(`Cannot unwind ${blocksToUnwind} blocks`);
+  public addCheckpoints(
+    checkpoints: PublishedCheckpoint[],
+    pendingChainValidationStatus?: ValidateBlockResult,
+  ): Promise<boolean> {
+    // Add the blocks to the store. Store will throw if the blocks are not in order, there are gaps,
+    // or if the previous block is not in the store.
+    return this.store.transactionAsync(async () => {
+      await this.store.addCheckpoints(checkpoints);
+      const allBlocks = checkpoints.flatMap((ch: PublishedCheckpoint) => ch.checkpoint.blocks);
+
+      const opResults = await Promise.all([
+        // Update the pending chain validation status if provided
+        pendingChainValidationStatus && this.store.setPendingChainValidationStatus(pendingChainValidationStatus),
+        // Add any logs emitted during the retrieved blocks
+        this.store.addLogs(allBlocks),
+        // Unroll all logs emitted during the retrieved blocks and extract any contract classes and instances from them
+        ...allBlocks.map(block => {
+          return this.addBlockDataToDB(block);
+        }),
+      ]);
+
+      return opResults.every(Boolean);
+    });
+  }
+
+  public async unwindCheckpoints(from: CheckpointNumber, checkpointsToUnwind: number): Promise<boolean> {
+    if (checkpointsToUnwind <= 0) {
+      throw new Error(`Cannot unwind ${checkpointsToUnwind} blocks`);
     }
 
-    // from - blocksToUnwind = the new head, so + 1 for what we need to remove
-    const blocks = await this.getPublishedBlocks(from - blocksToUnwind + 1, blocksToUnwind);
+    const last = await this.getSynchedCheckpointNumber();
+    if (from != last) {
+      throw new Error(`Cannot unwind checkpoints from checkpoint ${from} when the last checkpoint is ${last}`);
+    }
+
+    const blocks = [];
+    const lastCheckpointNumber = from + checkpointsToUnwind - 1;
+    for (let checkpointNumber = from; checkpointNumber <= lastCheckpointNumber; checkpointNumber++) {
+      const blocksForCheckpoint = await this.store.getBlocksForCheckpoint(checkpointNumber);
+      if (!blocksForCheckpoint) {
+        continue;
+      }
+      blocks.push(...blocksForCheckpoint);
+    }
 
     const opResults = await Promise.all([
       // Prune rolls back to the last proven block, which is by definition valid
       this.store.setPendingChainValidationStatus({ valid: true }),
       // Unroll all logs emitted during the retrieved blocks and extract any contract classes and instances from them
       ...blocks.map(async block => {
-        const contractClassLogs = block.block.body.txEffects.flatMap(txEffect => txEffect.contractClassLogs);
+        const contractClassLogs = block.body.txEffects.flatMap(txEffect => txEffect.contractClassLogs);
         // ContractInstancePublished event logs are broadcast in privateLogs.
-        const privateLogs = block.block.body.txEffects.flatMap(txEffect => txEffect.privateLogs);
-        const publicLogs = block.block.body.txEffects.flatMap(txEffect => txEffect.publicLogs);
+        const privateLogs = block.body.txEffects.flatMap(txEffect => txEffect.privateLogs);
+        const publicLogs = block.body.txEffects.flatMap(txEffect => txEffect.publicLogs);
 
         return (
           await Promise.all([
-            this.#updatePublishedContractClasses(contractClassLogs, block.block.number, Operation.Delete),
-            this.#updateDeployedContractInstances(privateLogs, block.block.number, Operation.Delete),
-            this.#updateUpdatedContractInstances(
-              publicLogs,
-              block.block.header.globalVariables.timestamp,
-              Operation.Delete,
-            ),
+            this.#updatePublishedContractClasses(contractClassLogs, block.number, Operation.Delete),
+            this.#updateDeployedContractInstances(privateLogs, block.number, Operation.Delete),
+            this.#updateUpdatedContractInstances(publicLogs, block.header.globalVariables.timestamp, Operation.Delete),
           ])
         ).every(Boolean);
       }),
 
-      this.store.deleteLogs(blocks.map(b => b.block)),
-      this.store.unwindBlocks(from, blocksToUnwind),
+      this.store.deleteLogs(blocks),
+      this.store.unwindCheckpoints(from, checkpointsToUnwind),
     ]);
 
     return opResults.every(Boolean);
   }
 
-  getPublishedBlocks(from: number, limit: number): Promise<PublishedL2Block[]> {
-    return this.store.getPublishedBlocks(from, limit);
+  getCheckpointData(checkpointNumber: CheckpointNumber): Promise<CheckpointData | undefined> {
+    return this.store.getCheckpointData(checkpointNumber);
   }
-  getPublishedBlock(number: number): Promise<PublishedL2Block | undefined> {
-    return this.store.getPublishedBlock(number);
+
+  getRangeOfCheckpoints(from: CheckpointNumber, limit: number): Promise<CheckpointData[]> {
+    return this.store.getRangeOfCheckpoints(from, limit);
   }
-  getPublishedBlockByHash(blockHash: Fr): Promise<PublishedL2Block | undefined> {
-    return this.store.getPublishedBlockByHash(blockHash);
+
+  getCheckpointedL2BlockNumber(): Promise<BlockNumber> {
+    return this.store.getCheckpointedL2BlockNumber();
   }
-  getPublishedBlockByArchive(archive: Fr): Promise<PublishedL2Block | undefined> {
-    return this.store.getPublishedBlockByArchive(archive);
+  getSynchedCheckpointNumber(): Promise<CheckpointNumber> {
+    return this.store.getSynchedCheckpointNumber();
   }
-  getBlockHeaders(from: number, limit: number): Promise<BlockHeader[]> {
+  setCheckpointSynchedL1BlockNumber(l1BlockNumber: bigint): Promise<void> {
+    return this.store.setCheckpointSynchedL1BlockNumber(l1BlockNumber);
+  }
+  getCheckpointedBlock(number: BlockNumber): Promise<CheckpointedL2Block | undefined> {
+    return this.store.getCheckpointedBlock(number);
+  }
+  getCheckpointedBlockByHash(blockHash: Fr): Promise<CheckpointedL2Block | undefined> {
+    return this.store.getCheckpointedBlockByHash(blockHash);
+  }
+  getCheckpointedBlockByArchive(archive: Fr): Promise<CheckpointedL2Block | undefined> {
+    return this.store.getCheckpointedBlockByArchive(archive);
+  }
+  getBlockHeaders(from: BlockNumber, limit: number): Promise<BlockHeader[]> {
     return this.store.getBlockHeaders(from, limit);
   }
   getBlockHeaderByHash(blockHash: Fr): Promise<BlockHeader | undefined> {
@@ -1668,6 +2050,18 @@ export class ArchiverStoreHelper
   }
   getBlockHeaderByArchive(archive: Fr): Promise<BlockHeader | undefined> {
     return this.store.getBlockHeaderByArchive(archive);
+  }
+  getBlockByHash(blockHash: Fr): Promise<L2BlockNew | undefined> {
+    return this.store.getBlockByHash(blockHash);
+  }
+  getBlockByArchive(archive: Fr): Promise<L2BlockNew | undefined> {
+    return this.store.getBlockByArchive(archive);
+  }
+  getLatestBlockNumber(): Promise<BlockNumber> {
+    return this.store.getLatestBlockNumber();
+  }
+  getBlocksForCheckpoint(checkpointNumber: CheckpointNumber): Promise<L2BlockNew[] | undefined> {
+    return this.store.getBlocksForCheckpoint(checkpointNumber);
   }
   getTxEffect(txHash: TxHash): Promise<IndexedTxEffect | undefined> {
     return this.store.getTxEffect(txHash);
@@ -1678,17 +2072,17 @@ export class ArchiverStoreHelper
   addL1ToL2Messages(messages: InboxMessage[]): Promise<void> {
     return this.store.addL1ToL2Messages(messages);
   }
-  getL1ToL2Messages(blockNumber: number): Promise<Fr[]> {
-    return this.store.getL1ToL2Messages(blockNumber);
+  getL1ToL2Messages(checkpointNumber: CheckpointNumber): Promise<Fr[]> {
+    return this.store.getL1ToL2Messages(checkpointNumber);
   }
   getL1ToL2MessageIndex(l1ToL2Message: Fr): Promise<bigint | undefined> {
     return this.store.getL1ToL2MessageIndex(l1ToL2Message);
   }
-  getPrivateLogs(from: number, limit: number): Promise<PrivateLog[]> {
-    return this.store.getPrivateLogs(from, limit);
+  getPrivateLogsByTags(tags: SiloedTag[]): Promise<TxScopedL2Log[][]> {
+    return this.store.getPrivateLogsByTags(tags);
   }
-  getLogsByTags(tags: Fr[], logsPerTag?: number): Promise<TxScopedL2Log[][]> {
-    return this.store.getLogsByTags(tags, logsPerTag);
+  getPublicLogsByTagsFromContract(contractAddress: AztecAddress, tags: Tag[]): Promise<TxScopedL2Log[][]> {
+    return this.store.getPublicLogsByTagsFromContract(contractAddress, tags);
   }
   getPublicLogs(filter: LogFilter): Promise<GetPublicLogsResponse> {
     return this.store.getPublicLogs(filter);
@@ -1696,17 +2090,20 @@ export class ArchiverStoreHelper
   getContractClassLogs(filter: LogFilter): Promise<GetContractClassLogsResponse> {
     return this.store.getContractClassLogs(filter);
   }
-  getSynchedL2BlockNumber(): Promise<number> {
-    return this.store.getSynchedL2BlockNumber();
+  getSynchedL2BlockNumber(): Promise<BlockNumber> {
+    return this.store.getCheckpointedL2BlockNumber();
   }
-  getProvenL2BlockNumber(): Promise<number> {
-    return this.store.getProvenL2BlockNumber();
+  getProvenCheckpointNumber(): Promise<CheckpointNumber> {
+    return this.store.getProvenCheckpointNumber();
   }
-  setProvenL2BlockNumber(l2BlockNumber: number): Promise<void> {
-    return this.store.setProvenL2BlockNumber(l2BlockNumber);
+  getProvenBlockNumber(): Promise<BlockNumber> {
+    return this.store.getProvenBlockNumber();
+  }
+  setProvenCheckpointNumber(checkpointNumber: CheckpointNumber): Promise<void> {
+    return this.store.setProvenCheckpointNumber(checkpointNumber);
   }
   setBlockSynchedL1BlockNumber(l1BlockNumber: bigint): Promise<void> {
-    return this.store.setBlockSynchedL1BlockNumber(l1BlockNumber);
+    return this.store.setCheckpointSynchedL1BlockNumber(l1BlockNumber);
   }
   setMessageSynchedL1Block(l1Block: L1BlockId): Promise<void> {
     return this.store.setMessageSynchedL1Block(l1Block);
@@ -1738,8 +2135,8 @@ export class ArchiverStoreHelper
   estimateSize(): Promise<{ mappingSize: number; physicalFileSize: number; actualSize: number; numItems: number }> {
     return this.store.estimateSize();
   }
-  rollbackL1ToL2MessagesToL2Block(targetBlockNumber: number): Promise<void> {
-    return this.store.rollbackL1ToL2MessagesToL2Block(targetBlockNumber);
+  rollbackL1ToL2MessagesToCheckpoint(targetCheckpointNumber: CheckpointNumber): Promise<void> {
+    return this.store.rollbackL1ToL2MessagesToCheckpoint(targetCheckpointNumber);
   }
   iterateL1ToL2Messages(range: CustomRange<bigint> = {}): AsyncIterableIterator<InboxMessage> {
     return this.store.iterateL1ToL2Messages(range);

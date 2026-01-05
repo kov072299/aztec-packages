@@ -11,11 +11,12 @@ import {
 } from '@aztec/aztec.js/authorization';
 import { AccountManager, type SendOptions, type SimulateOptions } from '@aztec/aztec.js/wallet';
 import type { DefaultAccountEntrypointOptions } from '@aztec/entrypoints/account';
-import { Fq, Fr, GrumpkinScalar } from '@aztec/foundation/fields';
+import { Fq, Fr } from '@aztec/foundation/curves/bn254';
+import { GrumpkinScalar } from '@aztec/foundation/curves/grumpkin';
 import { AuthWitness } from '@aztec/stdlib/auth-witness';
 import { AztecAddress } from '@aztec/stdlib/aztec-address';
 import type { ContractInstanceWithAddress } from '@aztec/stdlib/contract';
-import type { NotesFilter, UniqueNote } from '@aztec/stdlib/note';
+import type { NoteDao, NotesFilter } from '@aztec/stdlib/note';
 import type { TxSimulationResult } from '@aztec/stdlib/tx';
 import { ExecutionPayload, mergeExecutionPayloads } from '@aztec/stdlib/tx';
 import { BaseWallet } from '@aztec/wallet-sdk/base-wallet';
@@ -250,8 +251,8 @@ export abstract class BaseTestWallet extends BaseWallet {
    * @param filter - The filter to apply to the notes.
    * @returns The requested notes.
    */
-  getNotes(filter: NotesFilter): Promise<UniqueNote[]> {
-    return this.pxe.getNotes(filter);
+  getNotes(filter: NotesFilter): Promise<NoteDao[]> {
+    return this.pxe.debug.getNotes(filter);
   }
 
   /**

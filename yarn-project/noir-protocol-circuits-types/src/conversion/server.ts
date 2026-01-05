@@ -6,6 +6,7 @@ import {
   SpongeBlob,
 } from '@aztec/blob-lib/types';
 import {
+  AVM_V2_PROOF_LENGTH_IN_FIELDS_PADDED,
   AZTEC_MAX_EPOCH_DURATION,
   BLS12_FQ_LIMBS,
   BLS12_FR_LIMBS,
@@ -14,7 +15,9 @@ import {
   type NULLIFIER_TREE_HEIGHT,
   ULTRA_VK_LENGTH_IN_FIELDS,
 } from '@aztec/constants';
-import { BLS12Fq, BLS12Fr, BLS12Point, Fr } from '@aztec/foundation/fields';
+import { SlotNumber } from '@aztec/foundation/branded-types';
+import { BLS12Fq, BLS12Fr, BLS12Point } from '@aztec/foundation/curves/bls12';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { type Bufferable, assertLength, mapTuple } from '@aztec/foundation/serialize';
 import type { MembershipWitness } from '@aztec/foundation/trees';
 import {
@@ -30,7 +33,7 @@ import {
 } from '@aztec/stdlib/kernel';
 import type { FlatPublicLogs } from '@aztec/stdlib/logs';
 import { ParityBasePrivateInputs, ParityPublicInputs, ParityRootPrivateInputs } from '@aztec/stdlib/parity';
-import type { ProofData, RecursiveProof } from '@aztec/stdlib/proofs';
+import type { ProofData, ProofDataForFixedVk, RecursiveProof } from '@aztec/stdlib/proofs';
 import {
   BlockConstantData,
   BlockMergeRollupPrivateInputs,
@@ -96,6 +99,7 @@ import type {
   PrivateToAvmAccumulatedData as PrivateToAvmAccumulatedDataNoir,
   PrivateToPublicKernelCircuitPublicInputs as PrivateToPublicKernelCircuitPublicInputsNoir,
   PrivateTxBaseRollupPrivateInputs as PrivateTxBaseRollupPrivateInputsNoir,
+  ProofDataForFixedVk as ProofDataForFixedVkNoir,
   ProofData as ProofDataNoir,
   PublicChonkVerifierPrivateInputs as PublicChonkVerifierPrivateInputsNoir,
   PublicChonkVerifierPublicInputs as PublicChonkVerifierPublicInputsNoir,
@@ -361,7 +365,7 @@ function mapCheckpointConstantDataFromNoir(constants: CheckpointConstantDataNoir
     mapFieldFromNoir(constants.vk_tree_root),
     mapFieldFromNoir(constants.protocol_contracts_hash),
     mapFieldFromNoir(constants.prover_id),
-    mapFieldFromNoir(constants.slot_number),
+    SlotNumber(mapFieldFromNoir(constants.slot_number).toNumber()),
     mapEthAddressFromNoir(constants.coinbase),
     mapAztecAddressFromNoir(constants.fee_recipient),
     mapGasFeesFromNoir(constants.gas_fees),
@@ -375,7 +379,7 @@ function mapCheckpointConstantDataToNoir(constants: CheckpointConstantData): Che
     vk_tree_root: mapFieldToNoir(constants.vkTreeRoot),
     protocol_contracts_hash: mapFieldToNoir(constants.protocolContractsHash),
     prover_id: mapFieldToNoir(constants.proverId),
-    slot_number: mapFieldToNoir(constants.slotNumber),
+    slot_number: mapFieldToNoir(new Fr(constants.slotNumber)),
     coinbase: mapEthAddressToNoir(constants.coinbase),
     fee_recipient: mapAztecAddressToNoir(constants.feeRecipient),
     gas_fees: mapGasFeesToNoir(constants.gasFees),
@@ -448,6 +452,16 @@ function mapProofDataToNoir<T extends Bufferable, TN, PROOF_LENGTH extends numbe
     public_inputs: publicInputsToNoir(proofData.publicInputs),
     proof: mapFieldArrayToNoir(proofData.proof.proof),
     vk_data: mapVkDataToNoir(proofData.vkData, vkLength),
+  };
+}
+
+// Not generic since only one type exists on noir.
+export function mapAvmProofDataToNoir(
+  proofData: ProofDataForFixedVk<AvmCircuitPublicInputs, typeof AVM_V2_PROOF_LENGTH_IN_FIELDS_PADDED>,
+): ProofDataForFixedVkNoir {
+  return {
+    public_inputs: mapAvmCircuitPublicInputsToNoir(proofData.publicInputs),
+    proof: mapFieldArrayToNoir(proofData.proof.proof),
   };
 }
 
@@ -751,7 +765,7 @@ export function mapPublicTxBaseRollupPrivateInputsToNoir(
       inputs.publicChonkVerifierProofData,
       mapPublicChonkVerifierPublicInputsToNoir,
     ),
-    avm_proof_data: mapProofDataToNoir(inputs.avmProofData, mapAvmCircuitPublicInputsToNoir),
+    avm_proof_data: mapAvmProofDataToNoir(inputs.avmProofData),
     start_sponge_blob: mapSpongeBlobToNoir(inputs.hints.startSpongeBlob),
     last_archive: mapAppendOnlyTreeSnapshotToNoir(inputs.hints.lastArchive),
     anchor_block_archive_sibling_path: mapFieldArrayToNoir(inputs.hints.anchorBlockArchiveSiblingPath),

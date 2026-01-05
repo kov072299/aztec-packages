@@ -2,8 +2,11 @@ import type { AztecAddress } from '@aztec/aztec.js/addresses';
 import { type Logger, createLogger } from '@aztec/aztec.js/log';
 import type { AztecNode } from '@aztec/aztec.js/node';
 import { CheatCodes } from '@aztec/aztec/testing';
-import { type DeployL1ContractsArgs, RollupContract, createExtendedL1Client } from '@aztec/ethereum';
+import { createExtendedL1Client } from '@aztec/ethereum/client';
+import { RollupContract } from '@aztec/ethereum/contracts';
+import type { DeployAztecL1ContractsArgs } from '@aztec/ethereum/deploy-aztec-l1-contracts';
 import { ChainMonitor } from '@aztec/ethereum/test';
+import { BlockNumber } from '@aztec/foundation/branded-types';
 import { EthAddress } from '@aztec/foundation/eth-address';
 import { sleep } from '@aztec/foundation/sleep';
 import { TestERC20Abi } from '@aztec/l1-artifacts';
@@ -16,6 +19,7 @@ import { CounterContract } from '@aztec/noir-test-contracts.js/Counter';
 import { ProtocolContractAddress } from '@aztec/protocol-contracts';
 import { getCanonicalFeeJuice } from '@aztec/protocol-contracts/fee-juice';
 import { GasSettings } from '@aztec/stdlib/gas';
+import type { AztecNodeAdmin } from '@aztec/stdlib/interfaces/client';
 import { TestWallet } from '@aztec/test-wallet/server';
 
 import { getContract } from 'viem';
@@ -55,6 +59,7 @@ export class FeesTest {
 
   public logger: Logger;
   public aztecNode!: AztecNode;
+  public aztecNodeAdmin!: AztecNodeAdmin;
   public cheatCodes!: CheatCodes;
 
   public wallet!: TestWallet;
@@ -85,7 +90,7 @@ export class FeesTest {
   public getGasBalanceFn!: BalancesFn;
   public getBananaPublicBalanceFn!: BalancesFn;
   public getBananaPrivateBalanceFn!: BalancesFn;
-  public getProverFee!: (blockNumber: number) => Promise<bigint>;
+  public getProverFee!: (blockNumber: BlockNumber) => Promise<bigint>;
 
   public readonly ALICE_INITIAL_BANANAS = BigInt(1e22);
   public readonly SUBSCRIPTION_AMOUNT = BigInt(1e19);
@@ -94,7 +99,7 @@ export class FeesTest {
   constructor(
     testName: string,
     private numberOfAccounts = 3,
-    setupOptions: Partial<SetupOptions & DeployL1ContractsArgs> = {},
+    setupOptions: Partial<SetupOptions & DeployAztecL1ContractsArgs> = {},
   ) {
     if (!numberOfAccounts) {
       throw new Error('There must be at least 1 initial account.');
@@ -136,7 +141,7 @@ export class FeesTest {
   }
 
   async getBlockRewards() {
-    const blockReward = await this.rollupContract.getBlockReward();
+    const blockReward = await this.rollupContract.getCheckpointReward();
     const rewardConfig = await this.rollupContract.getRewardConfig();
 
     const balance = await this.feeJuiceBridgeTestHarness.getL1FeeJuiceBalance(
@@ -187,6 +192,7 @@ export class FeesTest {
       async ({ deployedAccounts }, { wallet, aztecNode, cheatCodes }) => {
         this.wallet = wallet;
         this.aztecNode = aztecNode;
+        this.aztecNodeAdmin = aztecNode;
         this.gasSettings = GasSettings.default({ maxFeesPerGas: (await this.aztecNode.getCurrentBaseFees()).mul(2) });
         this.cheatCodes = cheatCodes;
         this.accounts = deployedAccounts.map(a => a.address);
@@ -306,7 +312,7 @@ export class FeesTest {
           return await this.rollupContract.getSequencerRewards(this.coinbase);
         };
 
-        this.getProverFee = async (blockNumber: number) => {
+        this.getProverFee = async (blockNumber: BlockNumber) => {
           const block = await this.aztecNode.getBlock(blockNumber);
 
           // @todo @lherskind As we deal with #13601

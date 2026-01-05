@@ -1,6 +1,7 @@
-import { randomInt } from '@aztec/foundation/crypto';
+import { BlockNumber, CheckpointNumber, EpochNumber, SlotNumber } from '@aztec/foundation/branded-types';
+import { randomInt } from '@aztec/foundation/crypto/random';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { EthAddress } from '@aztec/foundation/eth-address';
-import { Fr } from '@aztec/foundation/fields';
 import { type JsonRpcTestContext, createJsonRpcTestSetup } from '@aztec/foundation/json-rpc/test';
 
 import omit from 'lodash.omit';
@@ -8,11 +9,13 @@ import omit from 'lodash.omit';
 import type { ContractArtifact } from '../abi/abi.js';
 import { FunctionSelector } from '../abi/function_selector.js';
 import { AztecAddress } from '../aztec-address/index.js';
-import { CommitteeAttestation, L2BlockHash } from '../block/index.js';
+import { CheckpointedL2Block, PublishedL2Block } from '../block/checkpointed_l2_block.js';
+import { CommitteeAttestation, L2BlockHash, L2BlockNew } from '../block/index.js';
 import { L2Block } from '../block/l2_block.js';
 import type { L2Tips } from '../block/l2_block_source.js';
-import { PublishedL2Block } from '../block/published_l2_block.js';
 import type { ValidateBlockResult } from '../block/validate_block_result.js';
+import { Checkpoint } from '../checkpoint/checkpoint.js';
+import { L1PublishedData, PublishedCheckpoint } from '../checkpoint/published_checkpoint.js';
 import { getContractClassFromArtifact } from '../contract/contract_class.js';
 import {
   type ContractClassPublic,
@@ -24,8 +27,10 @@ import { PublicKeys } from '../keys/public_keys.js';
 import { ExtendedContractClassLog } from '../logs/extended_contract_class_log.js';
 import { ExtendedPublicLog } from '../logs/extended_public_log.js';
 import type { LogFilter } from '../logs/log_filter.js';
-import { PrivateLog } from '../logs/private_log.js';
+import { SiloedTag } from '../logs/siloed_tag.js';
+import { Tag } from '../logs/tag.js';
 import { TxScopedL2Log } from '../logs/tx_scoped_l2_log.js';
+import { randomTxScopedPrivateL2Log } from '../tests/factories.js';
 import { getTokenContractArtifact } from '../tests/fixtures.js';
 import { BlockHeader } from '../tx/block_header.js';
 import type { IndexedTxEffect } from '../tx/indexed_tx_effect.js';
@@ -73,21 +78,21 @@ describe('ArchiverApiSchema', () => {
 
   it('getBlockNumber', async () => {
     const result = await context.client.getBlockNumber();
-    expect(result).toBe(1);
+    expect(result).toEqual(BlockNumber(1));
   });
 
   it('getProvenBlockNumber', async () => {
     const result = await context.client.getProvenBlockNumber();
-    expect(result).toBe(1);
+    expect(result).toEqual(BlockNumber(1));
   });
 
   it('getBlock', async () => {
-    const result = await context.client.getBlock(1);
+    const result = await context.client.getBlock(BlockNumber(1));
     expect(result).toBeInstanceOf(L2Block);
   });
 
   it('getBlockHeader', async () => {
-    const result = await context.client.getBlockHeader(1);
+    const result = await context.client.getBlockHeader(BlockNumber(1));
     expect(result).toBeInstanceOf(BlockHeader);
   });
 
@@ -101,13 +106,26 @@ describe('ArchiverApiSchema', () => {
     expect(result).toBeInstanceOf(BlockHeader);
   });
 
+  it('getL2BlockNew', async () => {
+    const result = await context.client.getL2BlockNew(BlockNumber(1));
+    expect(result).toBeInstanceOf(L2BlockNew);
+  });
+
   it('getBlocks', async () => {
-    const result = await context.client.getBlocks(1, 1);
+    const result = await context.client.getBlocks(BlockNumber(1), BlockNumber(1));
     expect(result).toEqual([expect.any(L2Block)]);
   });
 
+  it('getPublishedCheckpoints', async () => {
+    const response = await context.client.getPublishedCheckpoints(CheckpointNumber(1), BlockNumber(1));
+    expect(response).toHaveLength(1);
+    expect(response[0].checkpoint.constructor.name).toEqual('Checkpoint');
+    expect(response[0].attestations[0]).toBeInstanceOf(CommitteeAttestation);
+    expect(response[0].l1).toBeDefined();
+  });
+
   it('getPublishedBlocks', async () => {
-    const response = await context.client.getPublishedBlocks(1, 1);
+    const response = await context.client.getPublishedBlocks(BlockNumber(1), BlockNumber(1));
     expect(response).toHaveLength(1);
     expect(response[0].block.constructor.name).toEqual('L2Block');
     expect(response[0].attestations[0]).toBeInstanceOf(CommitteeAttestation);
@@ -131,37 +149,50 @@ describe('ArchiverApiSchema', () => {
   });
 
   it('getTxEffect', async () => {
-    const result = await context.client.getTxEffect(TxHash.fromBuffer(Buffer.alloc(32, 1)));
+    const result = await context.client.getTxEffect(TxHash.fromBuffer(Buffer.alloc(32, BlockNumber(1))));
     expect(result!.data).toBeInstanceOf(TxEffect);
   });
 
   it('getSettledTxReceipt', async () => {
-    const result = await context.client.getSettledTxReceipt(TxHash.fromBuffer(Buffer.alloc(32, 1)));
+    const result = await context.client.getSettledTxReceipt(TxHash.fromBuffer(Buffer.alloc(32, BlockNumber(1))));
     expect(result).toBeInstanceOf(TxReceipt);
   });
 
   it('getL2SlotNumber', async () => {
     const result = await context.client.getL2SlotNumber();
-    expect(result).toBe(1n);
+    expect(result).toBe(SlotNumber(1));
   });
 
   it('getL2EpochNumber', async () => {
     const result = await context.client.getL2EpochNumber();
-    expect(result).toBe(1n);
+    expect(result).toBe(EpochNumber(1));
+  });
+
+  it('getCheckpointsForEpoch', async () => {
+    const result = await context.client.getCheckpointsForEpoch(EpochNumber(1));
+    expect(result).toEqual([expect.any(Checkpoint)]);
+  });
+
+  it('getCheckpointedBlock', async () => {
+    const result = await context.client.getCheckpointedBlock(BlockNumber(1));
+    expect(result).toBeDefined();
+    expect(result!.block.constructor.name).toEqual('L2BlockNew');
+    expect(result!.attestations[0]).toBeInstanceOf(CommitteeAttestation);
+    expect(result!.l1).toBeDefined();
   });
 
   it('getBlocksForEpoch', async () => {
-    const result = await context.client.getBlocksForEpoch(1n);
+    const result = await context.client.getBlocksForEpoch(EpochNumber(1));
     expect(result).toEqual([expect.any(L2Block)]);
   });
 
   it('getBlockHeadersForEpoch', async () => {
-    const result = await context.client.getBlockHeadersForEpoch(1n);
+    const result = await context.client.getBlockHeadersForEpoch(EpochNumber(1));
     expect(result).toEqual([expect.any(BlockHeader)]);
   });
 
   it('isEpochComplete', async () => {
-    const result = await context.client.isEpochComplete(1n);
+    const result = await context.client.isEpochComplete(EpochNumber(1));
     expect(result).toBe(true);
   });
 
@@ -174,13 +205,14 @@ describe('ArchiverApiSchema', () => {
     });
   });
 
-  it('getPrivateLogs', async () => {
-    const result = await context.client.getPrivateLogs(1, 1);
-    expect(result).toEqual([expect.any(PrivateLog)]);
+  it('getPrivateLogsByTags', async () => {
+    const result = await context.client.getPrivateLogsByTags([new SiloedTag(Fr.random())]);
+    expect(result).toEqual([[expect.any(TxScopedL2Log)]]);
   });
 
-  it('getLogsByTags', async () => {
-    const result = await context.client.getLogsByTags([Fr.random()]);
+  it('getPublicLogsByTagsFromContract', async () => {
+    const contractAddress = await AztecAddress.random();
+    const result = await context.client.getPublicLogsByTagsFromContract(contractAddress, [new Tag(Fr.random())]);
     expect(result).toEqual([[expect.any(TxScopedL2Log)]]);
   });
 
@@ -231,7 +263,7 @@ describe('ArchiverApiSchema', () => {
   });
 
   it('getL1ToL2Messages', async () => {
-    const result = await context.client.getL1ToL2Messages(1);
+    const result = await context.client.getL1ToL2Messages(CheckpointNumber(1));
     expect(result).toEqual([expect.any(Fr)]);
   });
 
@@ -310,42 +342,64 @@ class MockArchiver implements ArchiverApi {
   getRegistryAddress(): Promise<EthAddress> {
     return Promise.resolve(EthAddress.random());
   }
-  getBlockNumber(): Promise<number> {
-    return Promise.resolve(1);
+  getBlockNumber(): Promise<BlockNumber> {
+    return Promise.resolve(BlockNumber(1));
   }
-  getProvenBlockNumber(): Promise<number> {
-    return Promise.resolve(1);
+  getProvenBlockNumber(): Promise<BlockNumber> {
+    return Promise.resolve(BlockNumber(1));
   }
-  getBlock(number: number): Promise<L2Block | undefined> {
+  getBlock(number: BlockNumber): Promise<L2Block | undefined> {
     return Promise.resolve(L2Block.random(number));
   }
-  getBlockHeader(_number: number | 'latest'): Promise<BlockHeader | undefined> {
+  getBlockHeader(_number: BlockNumber | 'latest'): Promise<BlockHeader | undefined> {
     return Promise.resolve(BlockHeader.empty());
   }
-  async getBlocks(from: number, _limit: number, _proven?: boolean): Promise<L2Block[]> {
+  async getCheckpointedBlock(number: BlockNumber): Promise<CheckpointedL2Block | undefined> {
+    return Promise.resolve(
+      CheckpointedL2Block.fromFields({
+        checkpointNumber: CheckpointNumber(1),
+        block: await L2BlockNew.random(number),
+        attestations: [CommitteeAttestation.random()],
+        l1: new L1PublishedData(1n, 0n, `0x`),
+      }),
+    );
+  }
+  async getBlocks(from: BlockNumber, _limit: number, _proven?: boolean): Promise<L2Block[]> {
     return [await L2Block.random(from)];
   }
-  async getPublishedBlocks(from: number, _limit: number, _proven?: boolean): Promise<PublishedL2Block[]> {
+  async getPublishedCheckpoints(from: CheckpointNumber, _limit: number): Promise<PublishedCheckpoint[]> {
+    return [
+      PublishedCheckpoint.from({
+        checkpoint: await Checkpoint.random(CheckpointNumber(from)),
+        attestations: [CommitteeAttestation.random()],
+        l1: new L1PublishedData(1n, 0n, `0x`),
+      }),
+    ];
+  }
+  getCheckpointByArchive(_archive: Fr): Promise<Checkpoint | undefined> {
+    return Promise.resolve(Checkpoint.random());
+  }
+  async getPublishedBlocks(from: BlockNumber, _limit: number, _proven?: boolean): Promise<PublishedL2Block[]> {
     return [
       PublishedL2Block.fromFields({
         block: await L2Block.random(from),
         attestations: [CommitteeAttestation.random()],
-        l1: { blockHash: `0x`, blockNumber: 1n, timestamp: 0n },
+        l1: new L1PublishedData(1n, 0n, `0x`),
       }),
     ];
   }
   async getPublishedBlockByHash(_blockHash: Fr): Promise<PublishedL2Block | undefined> {
     return PublishedL2Block.fromFields({
-      block: await L2Block.random(1),
+      block: await L2Block.random(BlockNumber(1)),
       attestations: [CommitteeAttestation.random()],
-      l1: { blockHash: `0x`, blockNumber: 1n, timestamp: 0n },
+      l1: new L1PublishedData(1n, 0n, `0x`),
     });
   }
   async getPublishedBlockByArchive(_archive: Fr): Promise<PublishedL2Block | undefined> {
     return PublishedL2Block.fromFields({
-      block: await L2Block.random(1),
+      block: await L2Block.random(BlockNumber(1)),
       attestations: [CommitteeAttestation.random()],
-      l1: { blockHash: `0x`, blockNumber: 1n, timestamp: 0n },
+      l1: new L1PublishedData(1n, 0n, `0x`),
     });
   }
   getBlockHeaderByHash(_blockHash: Fr): Promise<BlockHeader | undefined> {
@@ -354,10 +408,13 @@ class MockArchiver implements ArchiverApi {
   getBlockHeaderByArchive(_archive: Fr): Promise<BlockHeader | undefined> {
     return Promise.resolve(BlockHeader.empty());
   }
+  getL2BlockNew(number: BlockNumber): Promise<L2BlockNew | undefined> {
+    return L2BlockNew.random(number);
+  }
   async getTxEffect(_txHash: TxHash): Promise<IndexedTxEffect | undefined> {
     expect(_txHash).toBeInstanceOf(TxHash);
     return {
-      l2BlockNumber: 1,
+      l2BlockNumber: BlockNumber(1),
       l2BlockHash: L2BlockHash.fromNumber(0x12),
       data: await TxEffect.random(),
       txIndexInBlock: randomInt(10),
@@ -367,42 +424,52 @@ class MockArchiver implements ArchiverApi {
     expect(txHash).toBeInstanceOf(TxHash);
     return Promise.resolve(TxReceipt.empty());
   }
-  getL2SlotNumber(): Promise<bigint> {
-    return Promise.resolve(1n);
+  getL2SlotNumber(): Promise<SlotNumber> {
+    return Promise.resolve(SlotNumber(1));
   }
-  getL2EpochNumber(): Promise<bigint> {
-    return Promise.resolve(1n);
+  getL2EpochNumber(): Promise<EpochNumber | undefined> {
+    return Promise.resolve(EpochNumber(1));
   }
-  async getBlocksForEpoch(epochNumber: bigint): Promise<L2Block[]> {
-    expect(epochNumber).toEqual(1n);
-    return [await L2Block.random(Number(epochNumber))];
+  async getCheckpointsForEpoch(epochNumber: EpochNumber): Promise<Checkpoint[]> {
+    expect(epochNumber).toEqual(EpochNumber(1));
+    return [await Checkpoint.random(CheckpointNumber(BlockNumber(1)))];
   }
-  async getBlockHeadersForEpoch(epochNumber: bigint): Promise<BlockHeader[]> {
-    expect(epochNumber).toEqual(1n);
-    const block = await L2Block.random(Number(epochNumber));
+  async getBlocksForEpoch(epochNumber: EpochNumber): Promise<L2Block[]> {
+    expect(epochNumber).toEqual(EpochNumber(1));
+    return [await L2Block.random(BlockNumber(Number(epochNumber)))];
+  }
+  async getBlockHeadersForEpoch(epochNumber: EpochNumber): Promise<BlockHeader[]> {
+    expect(epochNumber).toEqual(EpochNumber(1));
+    const block = await L2Block.random(BlockNumber(Number(epochNumber)));
     return [block.getBlockHeader()];
   }
-  isEpochComplete(epochNumber: bigint): Promise<boolean> {
-    expect(epochNumber).toEqual(1n);
+  isEpochComplete(epochNumber: EpochNumber): Promise<boolean> {
+    expect(epochNumber).toEqual(EpochNumber(1));
     return Promise.resolve(true);
   }
   getL2Tips(): Promise<L2Tips> {
     return Promise.resolve({
-      latest: { number: 1, hash: `0x01` },
-      proven: { number: 1, hash: `0x01` },
-      finalized: { number: 1, hash: `0x01` },
+      latest: { number: BlockNumber(1), hash: `0x01` },
+      proven: { number: BlockNumber(1), hash: `0x01` },
+      finalized: { number: BlockNumber(1), hash: `0x01` },
     });
   }
-  getL2BlockHash(blockNumber: number): Promise<string | undefined> {
-    expect(blockNumber).toEqual(1);
+  getL2BlockHash(blockNumber: BlockNumber): Promise<string | undefined> {
+    expect(blockNumber).toEqual(BlockNumber(1));
     return Promise.resolve(`0x01`);
   }
-  getPrivateLogs(_from: number, _limit: number): Promise<PrivateLog[]> {
-    return Promise.resolve([PrivateLog.random()]);
+  getPrivateLogsByTags(tags: SiloedTag[], _logsPerTag?: number): Promise<TxScopedL2Log[][]> {
+    expect(tags[0]).toBeInstanceOf(SiloedTag);
+    return Promise.resolve([tags.map(() => randomTxScopedPrivateL2Log())]);
   }
-  async getLogsByTags(tags: Fr[]): Promise<TxScopedL2Log[][]> {
-    expect(tags[0]).toBeInstanceOf(Fr);
-    return [await Promise.all(tags.map(() => TxScopedL2Log.random()))];
+  getPublicLogsByTagsFromContract(
+    contractAddress: AztecAddress,
+    tags: Tag[],
+    _logsPerTag?: number,
+  ): Promise<TxScopedL2Log[][]> {
+    expect(contractAddress).toBeInstanceOf(AztecAddress);
+    expect(tags[0]).toBeInstanceOf(Tag);
+    return Promise.resolve([tags.map(() => randomTxScopedPrivateL2Log())]);
   }
   async getPublicLogs(filter: LogFilter): Promise<GetPublicLogsResponse> {
     expect(filter.txHash).toBeInstanceOf(TxHash);
@@ -459,8 +526,8 @@ class MockArchiver implements ArchiverApi {
     expect(Array.isArray(signatures)).toBe(true);
     return Promise.resolve();
   }
-  getL1ToL2Messages(blockNumber: number): Promise<Fr[]> {
-    expect(blockNumber).toEqual(1);
+  getL1ToL2Messages(checkpointNumber: CheckpointNumber): Promise<Fr[]> {
+    expect(checkpointNumber).toEqual(CheckpointNumber(1));
     return Promise.resolve([Fr.random()]);
   }
   getL1ToL2MessageIndex(l1ToL2Message: Fr): Promise<bigint | undefined> {

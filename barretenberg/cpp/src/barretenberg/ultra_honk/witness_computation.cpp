@@ -8,6 +8,7 @@
 #include "barretenberg/common/bb_bench.hpp"
 #include "barretenberg/ext/starknet/flavor/ultra_starknet_flavor.hpp"
 #include "barretenberg/ext/starknet/flavor/ultra_starknet_zk_flavor.hpp"
+#include "barretenberg/flavor/mega_avm_flavor.hpp"
 #include "barretenberg/flavor/mega_zk_flavor.hpp"
 #include "barretenberg/flavor/ultra_keccak_flavor.hpp"
 #include "barretenberg/flavor/ultra_keccak_zk_flavor.hpp"
@@ -102,7 +103,6 @@ template <IsUltraOrMegaHonk Flavor>
 void WitnessComputation<Flavor>::compute_grand_product_polynomial(Flavor::ProverPolynomials& polynomials,
                                                                   std::vector<FF>& public_inputs,
                                                                   const size_t pub_inputs_offset,
-                                                                  ActiveRegionData& active_region_data,
                                                                   RelationParameters<FF>& relation_parameters,
                                                                   size_t size_override)
 {
@@ -110,8 +110,7 @@ void WitnessComputation<Flavor>::compute_grand_product_polynomial(Flavor::Prover
         public_inputs, relation_parameters.beta, relation_parameters.gamma, pub_inputs_offset);
 
     // Compute permutation grand product polynomial
-    compute_grand_product<Flavor, UltraPermutationRelation<FF>>(
-        polynomials, relation_parameters, size_override, active_region_data);
+    compute_grand_product<Flavor, UltraPermutationRelation<FF>>(polynomials, relation_parameters, size_override);
 }
 
 /**
@@ -145,7 +144,6 @@ void WitnessComputation<Flavor>::complete_prover_instance_for_test(
     compute_grand_product_polynomial(prover_inst->polynomials,
                                      prover_inst->public_inputs,
                                      prover_inst->pub_inputs_offset(),
-                                     prover_inst->active_region_data,
                                      prover_inst->relation_parameters,
                                      prover_inst->get_final_active_wire_idx() + 1);
 }
@@ -161,5 +159,6 @@ template class WitnessComputation<UltraKeccakZKFlavor>;
 template class WitnessComputation<UltraRollupFlavor>;
 template class WitnessComputation<MegaFlavor>;
 template class WitnessComputation<MegaZKFlavor>;
+template class WitnessComputation<MegaAvmFlavor>;
 
 } // namespace bb

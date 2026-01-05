@@ -1,6 +1,7 @@
 import {
   Attributes,
   type Gauge,
+  type Histogram,
   Metrics,
   type TelemetryClient,
   type Tracer,
@@ -9,12 +10,18 @@ import {
   getTelemetryClient,
 } from '@aztec/telemetry-client';
 
+import type { PeerId } from '@libp2p/interface';
+
 import { type GoodByeReason, prettyGoodbyeReason } from '../reqresp/protocols/index.js';
 
 export class PeerManagerMetrics {
   private sentGoodbyes: UpDownCounter;
   private receivedGoodbyes: UpDownCounter;
   private peerCount: Gauge;
+  private lowScoreDisconnects: UpDownCounter;
+  private peerConnectionDuration: Histogram;
+
+  private peerConnectedAt: Map<string, number> = new Map<string, number>();
 
   public readonly tracer: Tracer;
 
@@ -40,6 +47,16 @@ export class PeerManagerMetrics {
       unit: 'peers',
       valueType: ValueType.INT,
     });
+    this.lowScoreDisconnects = meter.createUpDownCounter(Metrics.PEER_MANAGER_LOW_SCORE_DISCONNECTS, {
+      description: 'Number of peers disconnected due to low score',
+      unit: 'peers',
+      valueType: ValueType.INT,
+    });
+    this.peerConnectionDuration = meter.createHistogram(Metrics.PEER_MANAGER_PEER_CONNECTION_DURATION, {
+      description: 'Time duration between peer connection and disconnection',
+      unit: 'ms',
+      valueType: ValueType.INT,
+    });
   }
 
   public recordGoodbyeSent(reason: GoodByeReason) {
@@ -52,5 +69,20 @@ export class PeerManagerMetrics {
 
   public recordPeerCount(count: number) {
     this.peerCount.record(count);
+  }
+
+  public recordLowScoreDisconnect(scoreState: 'Banned' | 'Disconnect') {
+    this.lowScoreDisconnects.add(1, { [Attributes.P2P_PEER_SCORE_STATE]: scoreState });
+  }
+
+  public peerConnected(id: PeerId) {
+    this.peerConnectedAt.set(id.toString(), Date.now());
+  }
+
+  public peerDisconnected(id: PeerId) {
+    const connectedAt = this.peerConnectedAt.get(id.toString());
+    if (connectedAt) {
+      this.peerConnectionDuration.record(Date.now() - connectedAt);
+    }
   }
 }

@@ -5,7 +5,8 @@ import { L1TokenManager, L1TokenPortalManager } from '@aztec/aztec.js/ethereum';
 import { Fr } from '@aztec/aztec.js/fields';
 import { createLogger } from '@aztec/aztec.js/log';
 import { createAztecNodeClient, waitForNode } from '@aztec/aztec.js/node';
-import { createExtendedL1Client, deployL1Contract } from '@aztec/ethereum';
+import { createExtendedL1Client } from '@aztec/ethereum/client';
+import { deployL1Contract } from '@aztec/ethereum/deploy-l1-contract';
 import {
   FeeAssetHandlerAbi,
   FeeAssetHandlerBytecode,
@@ -228,5 +229,5 @@ describe('e2e_cross_chain_messaging token_bridge_tutorial_test', () => {
     logger.info(`New L1 balance of ${ownerEthAddress} is ${newL1Balance}`);
     // docs:end:l1-withdraw
     expect(newL1Balance).toBe(withdrawAmount);
-  }, 90000);
+  }, 110_000);
 });

@@ -1,11 +1,7 @@
-import { type BlobSinkConfig, blobSinkConfigMapping } from '@aztec/blob-sink/client';
-import {
-  type L1ContractsConfig,
-  type L1ReaderConfig,
-  l1ContractAddressesMapping,
-  l1ContractsConfigMappings,
-  l1ReaderConfigMappings,
-} from '@aztec/ethereum';
+import { type BlobClientConfig, blobClientConfigMapping } from '@aztec/blob-client/client/config';
+import { type L1ContractsConfig, l1ContractsConfigMappings } from '@aztec/ethereum/config';
+import { l1ContractAddressesMapping } from '@aztec/ethereum/l1-contract-addresses';
+import { type L1ReaderConfig, l1ReaderConfigMappings } from '@aztec/ethereum/l1-reader';
 import {
   type ConfigMappingsType,
   booleanConfigHelper,
@@ -22,10 +18,14 @@ import type { ArchiverSpecificConfig } from '@aztec/stdlib/interfaces/server';
  * Results of calls to eth_blockNumber are cached by viem with this cache being updated periodically at the interval specified by viemPollingIntervalMS.
  * As a result the maximum observed polling time for new blocks will be viemPollingIntervalMS + archiverPollingIntervalMS.
  */
-export type ArchiverConfig = ArchiverSpecificConfig & L1ReaderConfig & L1ContractsConfig & BlobSinkConfig & ChainConfig;
+export type ArchiverConfig = ArchiverSpecificConfig &
+  L1ReaderConfig &
+  L1ContractsConfig &
+  BlobClientConfig &
+  ChainConfig;
 
 export const archiverConfigMappings: ConfigMappingsType<ArchiverConfig> = {
-  ...blobSinkConfigMapping,
+  ...blobClientConfigMapping,
   archiverPollingIntervalMS: {
     env: 'ARCHIVER_POLLING_INTERVAL_MS',
     description: 'The polling interval in ms for retrieving new L2 blocks and encrypted logs.',
@@ -54,6 +54,11 @@ export const archiverConfigMappings: ConfigMappingsType<ArchiverConfig> = {
     env: 'MAX_ALLOWED_ETH_CLIENT_DRIFT_SECONDS',
     description: 'Maximum allowed drift in seconds between the Ethereum client and current time.',
     ...numberConfigHelper(300),
+  },
+  ethereumAllowNoDebugHosts: {
+    env: 'ETHEREUM_ALLOW_NO_DEBUG_HOSTS',
+    description: 'Whether to allow starting the archiver without debug/trace method support on Ethereum hosts',
+    ...booleanConfigHelper(true),
   },
   ...chainConfigMappings,
   ...l1ReaderConfigMappings,

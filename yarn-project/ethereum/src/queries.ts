@@ -3,6 +3,7 @@ import { EthAddress } from '@aztec/foundation/eth-address';
 import type { L1ContractsConfig } from './config.js';
 import { ReadOnlyGovernanceContract } from './contracts/governance.js';
 import { GovernanceProposerContract } from './contracts/governance_proposer.js';
+import { InboxContract } from './contracts/inbox.js';
 import { RollupContract } from './contracts/rollup.js';
 import type { ViemPublicClient } from './types.js';
 
@@ -25,6 +26,8 @@ export async function getL1ContractsConfig(
   const rollup = new RollupContract(publicClient, rollupAddress.toString());
   const slasherProposer = await rollup.getSlashingProposer();
   const slasher = await rollup.getSlasherContract();
+  const rollupAddresses = await rollup.getRollupAddresses();
+  const inboxContract = new InboxContract(publicClient, rollupAddresses.inboxAddress.toString());
 
   const [
     l1StartBlock,
@@ -33,7 +36,9 @@ export async function getL1ContractsConfig(
     aztecSlotDuration,
     aztecProofSubmissionEpochs,
     aztecTargetCommitteeSize,
-    lagInEpochs,
+    lagInEpochsForValidatorSet,
+    lagInEpochsForRandao,
+    inboxLag,
     activationThreshold,
     ejectionThreshold,
     localEjectionThreshold,
@@ -59,7 +64,9 @@ export async function getL1ContractsConfig(
     rollup.getSlotDuration(),
     rollup.getProofSubmissionEpochs(),
     rollup.getTargetCommitteeSize(),
-    rollup.getLagInEpochs(),
+    rollup.getLagInEpochsForValidatorSet(),
+    rollup.getLagInEpochsForRandao(),
+    inboxContract.getLag(),
     rollup.getActivationThreshold(),
     rollup.getEjectionThreshold(),
     rollup.getLocalEjectionThreshold(),
@@ -87,7 +94,9 @@ export async function getL1ContractsConfig(
     aztecSlotDuration: Number(aztecSlotDuration),
     aztecProofSubmissionEpochs: Number(aztecProofSubmissionEpochs),
     aztecTargetCommitteeSize: Number(aztecTargetCommitteeSize),
-    lagInEpochs: Number(lagInEpochs),
+    lagInEpochsForValidatorSet: Number(lagInEpochsForValidatorSet),
+    lagInEpochsForRandao: Number(lagInEpochsForRandao),
+    inboxLag: Number(inboxLag),
     governanceProposerQuorum: Number(governanceProposerQuorum),
     governanceProposerRoundSize: Number(governanceProposerRoundSize),
     activationThreshold,

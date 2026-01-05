@@ -2,7 +2,9 @@ import type { AztecAddress } from '@aztec/aztec.js/addresses';
 import { EthAddress } from '@aztec/aztec.js/addresses';
 import { waitForProven } from '@aztec/aztec.js/contracts';
 import { Tx, TxReceipt, TxStatus } from '@aztec/aztec.js/tx';
-import { type ExtendedViemWalletClient, RollupContract } from '@aztec/ethereum';
+import { RollupContract } from '@aztec/ethereum/contracts';
+import type { ExtendedViemWalletClient } from '@aztec/ethereum/types';
+import { BlockNumber } from '@aztec/foundation/branded-types';
 import { parseBooleanEnv } from '@aztec/foundation/config';
 import { getTestData, isGenerateTestDataEnabled } from '@aztec/foundation/testing';
 import { updateProtocolCircuitSampleInputs } from '@aztec/foundation/testing/files';
@@ -23,9 +25,6 @@ import { FullProverTest } from '../fixtures/e2e_prover_test.js';
 
 // Set a very long 15 minute timeout.
 const TIMEOUT = 900_000;
-
-// This makes AVM proving throw if there's a failure.
-process.env.AVM_PROVING_STRICT = '1';
 
 describe('full_prover', () => {
   const REAL_PROOFS = !parseBooleanEnv(process.env.FAKE_PROOFS);
@@ -135,8 +134,8 @@ describe('full_prover', () => {
       await cheatCodes.rollup.advanceToNextEpoch();
 
       const rewardsBeforeCoinbase = await rollup.getSequencerRewards(COINBASE_ADDRESS);
-      const rewardsBeforeProver = await rollup.getSpecificProverRewardsForEpoch(epoch, t.proverAddress);
-      const oldProvenBlockNumber = await rollup.getProvenBlockNumber();
+      const rewardsBeforeProver = await rollup.getSpecificProverRewardsForEpoch(BigInt(epoch), t.proverAddress);
+      const oldProvenCheckpointNumber = await rollup.getProvenCheckpointNumber();
 
       // And wait for the first pair of txs to be proven
       logger.info(`Awaiting proof for the previous epoch`);
@@ -147,26 +146,27 @@ describe('full_prover', () => {
         }),
       );
 
-      const newProvenBlockNumber = await rollup.getProvenBlockNumber();
-      expect(newProvenBlockNumber).toBeGreaterThan(oldProvenBlockNumber);
-      expect(await rollup.getBlockNumber()).toBe(newProvenBlockNumber);
+      const newProvenCheckpointNumber = await rollup.getProvenCheckpointNumber();
+      expect(newProvenCheckpointNumber).toBeGreaterThan(oldProvenCheckpointNumber);
+      expect(await rollup.getCheckpointNumber()).toBe(newProvenCheckpointNumber);
 
       logger.info(`checking rewards for coinbase: ${COINBASE_ADDRESS.toString()}`);
       const rewardsAfterCoinbase = await rollup.getSequencerRewards(COINBASE_ADDRESS);
       expect(rewardsAfterCoinbase).toBeGreaterThan(rewardsBeforeCoinbase);
 
-      const rewardsAfterProver = await rollup.getSpecificProverRewardsForEpoch(epoch, t.proverAddress);
+      const rewardsAfterProver = await rollup.getSpecificProverRewardsForEpoch(BigInt(epoch), t.proverAddress);
       expect(rewardsAfterProver).toBeGreaterThan(rewardsBeforeProver);
 
-      const blockReward = await rollup.getBlockReward();
+      const reward = await rollup.getCheckpointReward();
+      const newProvenBlockNumber = Number(newProvenCheckpointNumber);
       const fees = (
         await Promise.all([
-          t.aztecNode.getBlock(Number(newProvenBlockNumber - 1n)),
-          t.aztecNode.getBlock(Number(newProvenBlockNumber)),
+          t.aztecNode.getBlock(BlockNumber(newProvenBlockNumber - 1)),
+          t.aztecNode.getBlock(BlockNumber(newProvenBlockNumber)),
         ])
       ).map(b => b!.header.totalFees.toBigInt());
 
-      const totalRewards = fees.map(fee => fee + blockReward).reduce((acc, reward) => acc + reward, 0n);
+      const totalRewards = fees.map(fee => fee + reward).reduce((acc, reward) => acc + reward, 0n);
       const sequencerGain = rewardsAfterCoinbase - rewardsBeforeCoinbase;
       const proverGain = rewardsAfterProver - rewardsBeforeProver;
 

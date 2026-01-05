@@ -1,6 +1,7 @@
-import { randomBytes } from '@aztec/foundation/crypto';
+import { BlockNumber, SlotNumber } from '@aztec/foundation/branded-types';
+import { randomBytes } from '@aztec/foundation/crypto/random';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { EthAddress } from '@aztec/foundation/eth-address';
-import { Fr } from '@aztec/foundation/fields';
 import type { Logger } from '@aztec/foundation/log';
 import type { FieldsOf } from '@aztec/foundation/types';
 import { fileURLToPath } from '@aztec/foundation/url';
@@ -92,8 +93,8 @@ export const makeGlobals = (
   return GlobalVariables.from({
     chainId: checkpointConstants.chainId,
     version: checkpointConstants.version,
-    blockNumber /** block number */,
-    slotNumber: new Fr(slotNumber) /** slot number */,
+    blockNumber: BlockNumber(blockNumber) /** block number */,
+    slotNumber: SlotNumber(slotNumber) /** slot number */,
     timestamp: BigInt(blockNumber * 123) /** block number * 123 as pseudo-timestamp for testing */,
     coinbase: checkpointConstants.coinbase,
     feeRecipient: checkpointConstants.feeRecipient,
@@ -112,7 +113,7 @@ export const makeCheckpointConstants = (
     vkTreeRoot: getVKTreeRoot(),
     protocolContractsHash,
     proverId: Fr.ZERO,
-    slotNumber: new Fr(slotNumber),
+    slotNumber: SlotNumber(slotNumber),
     coinbase: EthAddress.ZERO,
     feeRecipient: AztecAddress.ZERO,
     gasFees: GasFees.empty(),

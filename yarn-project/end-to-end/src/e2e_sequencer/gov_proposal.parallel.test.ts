@@ -1,18 +1,16 @@
 import type { Wallet } from '@aztec/aztec.js/wallet';
 import { CheatCodes } from '@aztec/aztec/testing';
-import type { BlobSinkServer } from '@aztec/blob-sink/server';
-import {
-  type DeployL1ContractsReturnType,
-  GovernanceProposerContract,
-  RollupContract,
-  deployL1Contract,
-} from '@aztec/ethereum';
+import { type BlobClientInterface, HttpBlobClient } from '@aztec/blob-client/client';
+import { GovernanceProposerContract, RollupContract } from '@aztec/ethereum/contracts';
+import type { DeployAztecL1ContractsReturnType } from '@aztec/ethereum/deploy-aztec-l1-contracts';
+import { deployL1Contract } from '@aztec/ethereum/deploy-l1-contract';
 import { ChainMonitor } from '@aztec/ethereum/test';
+import { EpochNumber, SlotNumber } from '@aztec/foundation/branded-types';
 import { times } from '@aztec/foundation/collection';
 import { SecretValue } from '@aztec/foundation/config';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { TimeoutError } from '@aztec/foundation/error';
 import { EthAddress } from '@aztec/foundation/eth-address';
-import { Fr } from '@aztec/foundation/fields';
 import type { Logger } from '@aztec/foundation/log';
 import { retryUntil } from '@aztec/foundation/retry';
 import { sleep } from '@aztec/foundation/sleep';
@@ -46,10 +44,10 @@ describe('e2e_gov_proposal', () => {
   let defaultAccountAddress: AztecAddress;
   let aztecNode: AztecNode | undefined;
   let aztecNodeAdmin: AztecNodeAdmin | undefined;
-  let deployL1ContractsValues: DeployL1ContractsReturnType;
+  let deployL1ContractsValues: DeployAztecL1ContractsReturnType;
   let cheatCodes: CheatCodes;
-  let blobSink: BlobSinkServer | undefined;
   let dateProvider: TestDateProvider | undefined;
+  let blobClient: BlobClientInterface | undefined;
   let rollup: RollupContract;
   let governanceProposer: GovernanceProposerContract;
   let newGovernanceProposerAddress: EthAddress;
@@ -75,7 +73,6 @@ describe('e2e_gov_proposal', () => {
       ethereumSlotDuration: ETHEREUM_SLOT_DURATION,
       aztecSlotDuration: AZTEC_SLOT_DURATION,
       aztecProofSubmissionEpochs: 128, // no pruning
-      salt: 420,
       minTxsPerBlock: TXS_PER_BLOCK,
       enforceTimeTable: true,
       automineL1Setup: true, // speed up setup
@@ -90,8 +87,8 @@ describe('e2e_gov_proposal', () => {
       deployL1ContractsValues,
       cheatCodes,
       dateProvider,
+      blobClient,
       accounts,
-      blobSink,
     } = context);
     defaultAccountAddress = accounts[0];
 
@@ -117,7 +114,7 @@ describe('e2e_gov_proposal', () => {
     testContract = await TestContract.deploy(wallet).send({ from: defaultAccountAddress }).deployed();
     logger.warn(`Deployed test contract at ${testContract.address}`);
 
-    await cheatCodes.rollup.advanceToEpoch(2n);
+    await cheatCodes.rollup.advanceToEpoch(EpochNumber(4));
   });
 
   afterEach(() => teardown());
@@ -129,7 +126,7 @@ describe('e2e_gov_proposal', () => {
 
     const slot = await rollup.getSlotNumber();
     const round = await governanceProposer.computeRound(slot);
-    const nextRoundBeginsAtSlot = (slot / roundDuration) * roundDuration + roundDuration;
+    const nextRoundBeginsAtSlot = SlotNumber(Number((BigInt(slot) / roundDuration) * roundDuration + roundDuration));
     const nextRoundBeginsAtTimestamp = await rollup.getTimestampForSlot(nextRoundBeginsAtSlot);
 
     logger.warn(`Warping to round ${round + 1n} at slot ${nextRoundBeginsAtSlot}`, {
@@ -191,11 +188,11 @@ describe('e2e_gov_proposal', () => {
   it('should vote even when unable to build blocks', async () => {
     const monitor = new ChainMonitor(rollup, dateProvider).start();
 
-    // Break the blob sink so no new blocks are synced
-    blobSink!.setDisableBlobStorage(true);
+    // Break the blob client so no new blocks are synced
+    (blobClient as HttpBlobClient).setDisabled(true);
     await sleep(1000);
     const lastBlockSynced = await aztecNode!.getBlockNumber();
-    logger.warn(`Blob sink is disabled (last block synced is ${lastBlockSynced})`);
+    logger.warn(`blob client is disabled (last block synced is ${lastBlockSynced})`);
 
     // And send a tx which shouldnt be syncable but does move the block forward
     await expect(() =>
@@ -207,7 +204,7 @@ describe('e2e_gov_proposal', () => {
     logger.warn(`Test tx timed out as expected`);
 
     // Check that the block number has indeed increased on L1 so sequencers cant pass the sync check
-    expect(await monitor.run().then(b => b.l2BlockNumber)).toBeGreaterThan(lastBlockSynced);
+    expect(await monitor.run().then(b => b.checkpointNumber)).toBeGreaterThan(lastBlockSynced);
     logger.warn(`L2 block number has increased on L1`);
 
     // Start voting!
@@ -215,7 +212,7 @@ describe('e2e_gov_proposal', () => {
     const { round, roundDuration, nextRoundBeginsAtSlot } = await setupVotingRound();
 
     // And wait until the round is over
-    const nextRoundEndsAtSlot = nextRoundBeginsAtSlot + roundDuration;
+    const nextRoundEndsAtSlot = SlotNumber(nextRoundBeginsAtSlot + Number(roundDuration));
     const timeout = AZTEC_SLOT_DURATION * Number(roundDuration + 1n) + 20;
     logger.warn(`Waiting until slot ${nextRoundEndsAtSlot} for round to end (timeout ${timeout}s)`);
     await retryUntil(() => rollup.getSlotNumber().then(s => s > nextRoundEndsAtSlot), 'round end', timeout, 1);

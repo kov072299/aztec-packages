@@ -4,7 +4,7 @@ use crate::{
         authorization_selector::AuthorizationSelector,
     },
     context::{gas::GasOpts, PrivateContext, PublicContext},
-    hash::hash_args_array,
+    hash::hash_args,
     macros::authorization::authorization,
     oracle::{execution_cache::load, offchain_effect::emit_offchain_effect},
 };
@@ -12,8 +12,8 @@ use dep::protocol_types::{
     abis::function_selector::FunctionSelector,
     address::AztecAddress,
     constants::{
-        CANONICAL_AUTH_REGISTRY_ADDRESS, GENERATOR_INDEX__AUTHWIT_INNER,
-        GENERATOR_INDEX__AUTHWIT_NULLIFIER, GENERATOR_INDEX__AUTHWIT_OUTER,
+        CANONICAL_AUTH_REGISTRY_ADDRESS, DOM_SEP__AUTHWIT_INNER, DOM_SEP__AUTHWIT_NULLIFIER,
+        DOM_SEP__AUTHWIT_OUTER,
     },
     hash::poseidon2_hash_with_separator,
     traits::{Serialize, ToField},
@@ -344,7 +344,7 @@ pub unconstrained fn assert_inner_hash_valid_authwit_public(
     let results: [Field] = context.call_public_function(
         CANONICAL_AUTH_REGISTRY_ADDRESS,
         comptime { FunctionSelector::from_signature("consume((Field),Field)") },
-        [on_behalf_of.to_field(), inner_hash].as_slice(),
+        [on_behalf_of.to_field(), inner_hash],
         GasOpts::default(),
     );
     assert(results.len() == 1, "Invalid response from registry");
@@ -373,7 +373,7 @@ pub fn compute_authwit_message_hash_from_call<let N: u32>(
     selector: FunctionSelector,
     args: [Field; N],
 ) -> Field {
-    let args_hash = hash_args_array(args);
+    let args_hash = hash_args(args);
     let inner_hash =
         compute_inner_authwit_hash([caller.to_field(), selector.to_field(), args_hash]);
     compute_authwit_message_hash(consumer, chain_id, version, inner_hash)
@@ -388,7 +388,7 @@ pub fn compute_authwit_message_hash_from_call<let N: u32>(
  * @param args The arguments to hash
  */
 pub fn compute_inner_authwit_hash<let N: u32>(args: [Field; N]) -> Field {
-    poseidon2_hash_with_separator(args, GENERATOR_INDEX__AUTHWIT_INNER)
+    poseidon2_hash_with_separator(args, DOM_SEP__AUTHWIT_INNER)
 }
 
 /**
@@ -402,7 +402,7 @@ pub fn compute_inner_authwit_hash<let N: u32>(args: [Field; N]) -> Field {
 pub fn compute_authwit_nullifier(on_behalf_of: AztecAddress, inner_hash: Field) -> Field {
     poseidon2_hash_with_separator(
         [on_behalf_of.to_field(), inner_hash],
-        GENERATOR_INDEX__AUTHWIT_NULLIFIER,
+        DOM_SEP__AUTHWIT_NULLIFIER,
     )
 }
 
@@ -422,7 +422,7 @@ pub fn compute_authwit_message_hash(
 ) -> Field {
     poseidon2_hash_with_separator(
         [consumer.to_field(), chain_id, version, inner_hash],
-        GENERATOR_INDEX__AUTHWIT_OUTER,
+        DOM_SEP__AUTHWIT_OUTER,
     )
 }
 
@@ -438,7 +438,7 @@ pub unconstrained fn set_authorized(context: PublicContext, message_hash: Field,
     let res = context.call_public_function(
         CANONICAL_AUTH_REGISTRY_ADDRESS,
         comptime { FunctionSelector::from_signature("set_authorized(Field,bool)") },
-        [message_hash, authorize as Field].as_slice(),
+        [message_hash, authorize as Field],
         GasOpts::default(),
     );
     assert(res.len() == 0);
@@ -455,7 +455,7 @@ pub unconstrained fn set_reject_all(context: PublicContext, reject: bool) {
     let res = context.call_public_function(
         CANONICAL_AUTH_REGISTRY_ADDRESS,
         comptime { FunctionSelector::from_signature("set_reject_all(bool)") },
-        [context.this_address().to_field(), reject as Field].as_slice(),
+        [context.this_address().to_field(), reject as Field],
         GasOpts::default(),
     );
     assert(res.len() == 0);

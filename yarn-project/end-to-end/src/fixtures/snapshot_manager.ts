@@ -9,22 +9,25 @@ import type { Logger } from '@aztec/aztec.js/log';
 import type { AztecNode } from '@aztec/aztec.js/node';
 import type { Wallet } from '@aztec/aztec.js/wallet';
 import { AnvilTestWatcher, CheatCodes } from '@aztec/aztec/testing';
-import { type BlobSinkServer, createBlobSinkServer } from '@aztec/blob-sink/server';
+import { createBlobClientWithFileStores } from '@aztec/blob-client/client';
+import { createExtendedL1Client } from '@aztec/ethereum/client';
+import { getL1ContractsConfigEnvVars } from '@aztec/ethereum/config';
+import { deployMulticall3 } from '@aztec/ethereum/contracts';
 import {
-  type DeployL1ContractsArgs,
-  type DeployL1ContractsReturnType,
-  createExtendedL1Client,
-  deployMulticall3,
-  getL1ContractsConfigEnvVars,
-} from '@aztec/ethereum';
+  type DeployAztecL1ContractsArgs,
+  type DeployAztecL1ContractsReturnType,
+  deployAztecL1Contracts,
+} from '@aztec/ethereum/deploy-aztec-l1-contracts';
 import { EthCheatCodesWithState, startAnvil } from '@aztec/ethereum/test';
 import { asyncMap } from '@aztec/foundation/async-map';
 import { SecretValue } from '@aztec/foundation/config';
-import { randomBytes } from '@aztec/foundation/crypto';
+import { randomBytes } from '@aztec/foundation/crypto/random';
 import { tryRmDir } from '@aztec/foundation/fs';
 import { createLogger } from '@aztec/foundation/log';
 import { resolver, reviver } from '@aztec/foundation/serialize';
 import { TestDateProvider } from '@aztec/foundation/timer';
+import { getVKTreeRoot } from '@aztec/noir-protocol-circuits-types/vk-tree';
+import { protocolContractsHash } from '@aztec/protocol-contracts';
 import type { ProverNode } from '@aztec/prover-node';
 import { getPXEConfig } from '@aztec/pxe/server';
 import type { SequencerClient } from '@aztec/sequencer-client';
@@ -37,23 +40,22 @@ import type { Anvil } from '@viem/anvil';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { copySync, removeSync } from 'fs-extra/esm';
 import fs from 'fs/promises';
-import getPort from 'get-port';
 import { tmpdir } from 'os';
 import path, { join } from 'path';
 import type { Hex } from 'viem';
 import { mnemonicToAccount } from 'viem/accounts';
 import { foundry } from 'viem/chains';
 
-import { MNEMONIC, TEST_MAX_TX_POOL_SIZE, TEST_PEER_CHECK_INTERVAL_MS } from './fixtures.js';
+import { MNEMONIC, TEST_MAX_PENDING_TX_POOL_COUNT, TEST_PEER_CHECK_INTERVAL_MS } from './fixtures.js';
 import { getACVMConfig } from './get_acvm_config.js';
 import { getBBConfig } from './get_bb_config.js';
-import { setupL1Contracts } from './setup_l1_contracts.js';
 import {
   type SetupOptions,
   createAndSyncProverNode,
   getLogger,
   getPrivateKeyFromIndex,
   getSponsoredFPCAddress,
+  setupSharedBlobStorage,
 } from './utils.js';
 import { getEndToEndTestTelemetryClient } from './with_telemetry_utils.js';
 
@@ -64,13 +66,12 @@ export type SubsystemsContext = {
   aztecNode: AztecNodeService;
   aztecNodeConfig: AztecNodeConfig;
   wallet: TestWallet;
-  deployL1ContractsValues: DeployL1ContractsReturnType;
+  deployL1ContractsValues: DeployAztecL1ContractsReturnType;
   proverNode?: ProverNode;
   watcher: AnvilTestWatcher;
   cheatCodes: CheatCodes;
   sequencer: SequencerClient;
   dateProvider: TestDateProvider;
-  blobSink: BlobSinkServer;
   initialFundedAccounts: InitialAccountData[];
   directoryToCleanup?: string;
 };
@@ -86,7 +87,7 @@ export function createSnapshotManager(
   testName: string,
   dataPath?: string,
   config: Partial<SetupOptions> = {},
-  deployL1ContractsArgs: Partial<DeployL1ContractsArgs> = {
+  deployL1ContractsArgs: Partial<DeployAztecL1ContractsArgs> = {
     initialValidators: [],
   },
 ) {
@@ -115,7 +116,7 @@ class MockSnapshotManager implements ISnapshotManager {
   constructor(
     testName: string,
     private config: Partial<AztecNodeConfig> = {},
-    private deployL1ContractsArgs: Partial<DeployL1ContractsArgs> = {},
+    private deployL1ContractsArgs: Partial<DeployAztecL1ContractsArgs> = {},
   ) {
     this.logger = createLogger(`e2e:snapshot_manager:${testName}`);
     this.logger.warn(`No data path given, will not persist any snapshots.`);
@@ -163,7 +164,7 @@ class SnapshotManager implements ISnapshotManager {
     testName: string,
     private dataPath: string,
     private config: Partial<SetupOptions> = {},
-    private deployL1ContractsArgs: Partial<DeployL1ContractsArgs> = {},
+    private deployL1ContractsArgs: Partial<DeployAztecL1ContractsArgs> = {},
   ) {
     this.livePath = join(this.dataPath, 'live', testName);
     this.logger = createLogger(`e2e:snapshot_manager:${testName}`);
@@ -273,7 +274,6 @@ async function teardown(context: SubsystemsContext | undefined) {
     await context.bbConfig?.cleanup();
     await tryStop(context.anvil);
     await tryStop(context.watcher);
-    await tryStop(context.blobSink);
     await tryRmDir(context.directoryToCleanup, logger);
   } catch (err) {
     logger.error('Error during teardown', err);
@@ -289,13 +289,11 @@ async function setupFromFresh(
   statePath: string | undefined,
   logger: Logger,
   { numberOfInitialFundedAccounts = 10, ...opts }: SetupOptions = {},
-  deployL1ContractsArgs: Partial<DeployL1ContractsArgs> = {
+  deployL1ContractsArgs: Partial<DeployAztecL1ContractsArgs> = {
     initialValidators: [],
   },
 ): Promise<SubsystemsContext> {
   logger.verbose(`Initializing state...`);
-
-  const blobSinkPort = await getPort();
 
   // Default to no slashing
   opts.slasherFlavor ??= 'none';
@@ -305,7 +303,7 @@ async function setupFromFresh(
   // TODO: For some reason this is currently the union of a bunch of subsystems. That needs fixing.
   const aztecNodeConfig: AztecNodeConfig & SetupOptions = { ...getConfigEnvVars(), ...opts };
   aztecNodeConfig.peerCheckIntervalMS = TEST_PEER_CHECK_INTERVAL_MS;
-  aztecNodeConfig.maxTxPoolSize = opts.maxTxPoolSize ?? TEST_MAX_TX_POOL_SIZE;
+  aztecNodeConfig.maxPendingTxCount = opts.maxPendingTxCount ?? TEST_MAX_PENDING_TX_POOL_COUNT;
   // Only enable proving if specifically requested.
   aztecNodeConfig.realProofs = !!opts.realProofs;
   // Only enforce the time table if requested
@@ -324,18 +322,20 @@ async function setupFromFresh(
   } else {
     aztecNodeConfig.dataDirectory = statePath;
   }
-  aztecNodeConfig.blobSinkUrl = `http://127.0.0.1:${blobSinkPort}`;
+
+  await setupSharedBlobStorage(aztecNodeConfig);
 
   const hdAccount = mnemonicToAccount(MNEMONIC, { addressIndex: 0 });
   const publisherPrivKeyRaw = hdAccount.getHdKey().privateKey;
   const publisherPrivKey = publisherPrivKeyRaw === null ? null : Buffer.from(publisherPrivKeyRaw);
+  const publisherPrivKeyHex = `0x${publisherPrivKey!.toString('hex')}` satisfies `0x${string}`;
 
   const l1Client = createExtendedL1Client([aztecNodeConfig.l1RpcUrls[0]], hdAccount, foundry);
 
   const validatorPrivKey = getPrivateKeyFromIndex(0);
   const proverNodePrivateKey = getPrivateKeyFromIndex(0);
 
-  aztecNodeConfig.publisherPrivateKeys = [new SecretValue<`0x${string}`>(`0x${publisherPrivKey!.toString('hex')}`)];
+  aztecNodeConfig.publisherPrivateKeys = [new SecretValue(publisherPrivKeyHex)];
   aztecNodeConfig.validatorPrivateKeys = new SecretValue([`0x${validatorPrivKey!.toString('hex')}`]);
   aztecNodeConfig.coinbase = opts.coinbase ?? EthAddress.fromString(`${hdAccount.address}`);
 
@@ -351,7 +351,7 @@ async function setupFromFresh(
   const ethCheatCodes = new EthCheatCodesWithState(aztecNodeConfig.l1RpcUrls, dateProvider);
 
   // Deploy our L1 contracts.
-  logger.verbose('Deploying L1 contracts...');
+  logger.verbose('Deploying Aztec L1 contracts...');
   if (opts.l1StartTime) {
     await ethCheatCodes.warp(opts.l1StartTime, { resetBlockInterval: true });
   }
@@ -363,16 +363,28 @@ async function setupFromFresh(
     opts.initialAccountFeeJuice,
   );
 
+  const vkTreeRoot = getVKTreeRoot();
   await deployMulticall3(l1Client, logger);
 
-  const deployL1ContractsValues = await setupL1Contracts(aztecNodeConfig.l1RpcUrls[0], hdAccount, logger, {
+  // Define args, defaulted to our environment variables.
+  const args: DeployAztecL1ContractsArgs = {
     ...getL1ContractsConfigEnvVars(),
-    genesisArchiveRoot,
-    feeJuicePortalInitialBalance: fundingNeeded,
-    salt: opts.salt,
     ...deployL1ContractsArgs,
+    vkTreeRoot,
+    genesisArchiveRoot,
+    protocolContractsHash,
     initialValidators: opts.initialValidators,
-  });
+    feeJuicePortalInitialBalance: fundingNeeded,
+    realVerifier: false,
+  };
+
+  const deployL1ContractsValues = await deployAztecL1Contracts(
+    aztecNodeConfig.l1RpcUrls[0],
+    publisherPrivKeyHex,
+    foundry.id,
+    args,
+  );
+
   aztecNodeConfig.l1Contracts = deployL1ContractsValues.l1ContractAddresses;
   aztecNodeConfig.rollupVersion = deployL1ContractsValues.rollupVersion;
 
@@ -396,26 +408,14 @@ async function setupFromFresh(
     aztecNodeConfig.bbWorkingDirectory = bbConfig.bbWorkingDirectory;
   }
 
-  const telemetry = getEndToEndTestTelemetryClient(opts.metricsPort);
+  const telemetry = await getEndToEndTestTelemetryClient(opts.metricsPort);
 
-  // Setup blob sink service
-  const blobSink = await createBlobSinkServer(
-    {
-      l1ChainId: aztecNodeConfig.l1ChainId,
-      l1RpcUrls: aztecNodeConfig.l1RpcUrls,
-      l1Contracts: aztecNodeConfig.l1Contracts,
-      port: blobSinkPort,
-      dataDirectory: aztecNodeConfig.dataDirectory,
-      dataStoreMapSizeKb: aztecNodeConfig.dataStoreMapSizeKb,
-    },
-    telemetry,
-  );
-  await blobSink.start();
+  const blobClient = await createBlobClientWithFileStores(aztecNodeConfig, createLogger('node:blob-client:client'));
 
   logger.info('Creating and synching an aztec node...');
   const aztecNode = await AztecNodeService.createAndSync(
     aztecNodeConfig,
-    { telemetry, dateProvider },
+    { telemetry, dateProvider, blobClient },
     { prefilledPublicData },
   );
 
@@ -461,7 +461,6 @@ async function setupFromFresh(
     watcher,
     cheatCodes,
     dateProvider,
-    blobSink,
     initialFundedAccounts,
     directoryToCleanup,
   };
@@ -476,17 +475,15 @@ async function setupFromState(statePath: string, logger: Logger): Promise<Subsys
   const directoryToCleanup = path.join(tmpdir(), randomBytes(8).toString('hex'));
   await fs.mkdir(directoryToCleanup, { recursive: true });
 
-  // Run the blob sink on a random port
-  const blobSinkPort = await getPort();
-
   // TODO: For some reason this is currently the union of a bunch of subsystems. That needs fixing.
   const aztecNodeConfig: AztecNodeConfig & SetupOptions = JSON.parse(
     readFileSync(`${statePath}/aztec_node_config.json`, 'utf-8'),
     reviver,
   );
   aztecNodeConfig.dataDirectory = statePath;
-  aztecNodeConfig.blobSinkUrl = `http://127.0.0.1:${blobSinkPort}`;
   aztecNodeConfig.listenAddress = '127.0.0.1';
+
+  await setupSharedBlobStorage(aztecNodeConfig);
 
   const initialFundedAccounts: InitialAccountData[] =
     JSON.parse(readFileSync(`${statePath}/accounts.json`, 'utf-8'), reviver) || [];
@@ -526,24 +523,14 @@ async function setupFromState(statePath: string, logger: Logger): Promise<Subsys
   );
   await watcher.start();
 
-  const telemetry = initTelemetryClient(getTelemetryConfig());
-  const blobSink = await createBlobSinkServer(
-    {
-      l1ChainId: aztecNodeConfig.l1ChainId,
-      l1RpcUrls: aztecNodeConfig.l1RpcUrls,
-      l1Contracts: aztecNodeConfig.l1Contracts,
-      port: blobSinkPort,
-      dataDirectory: statePath,
-      dataStoreMapSizeKb: aztecNodeConfig.dataStoreMapSizeKb,
-    },
-    telemetry,
-  );
-  await blobSink.start();
+  const telemetry = await initTelemetryClient(getTelemetryConfig());
+
+  const blobClient = await createBlobClientWithFileStores(aztecNodeConfig, createLogger('node:blob-client:client'));
 
   logger.verbose('Creating aztec node...');
   const aztecNode = await AztecNodeService.createAndSync(
     aztecNodeConfig,
-    { telemetry, dateProvider },
+    { telemetry, dateProvider, blobClient },
     { prefilledPublicData },
   );
 
@@ -588,7 +575,6 @@ async function setupFromState(statePath: string, logger: Logger): Promise<Subsys
     watcher,
     cheatCodes,
     dateProvider,
-    blobSink,
     initialFundedAccounts,
     directoryToCleanup,
   };

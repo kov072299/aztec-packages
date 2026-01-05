@@ -1,5 +1,4 @@
-import type { ViemAppendOnlyTreeSnapshot } from '@aztec/ethereum';
-import { Fr } from '@aztec/foundation/fields';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { schemas } from '@aztec/foundation/schemas';
 import { BufferReader, FieldReader, serializeToBuffer } from '@aztec/foundation/serialize';
 import { bufferToHex, hexToBuffer } from '@aztec/foundation/string';
@@ -70,17 +69,6 @@ export class AppendOnlyTreeSnapshot {
     const reader = FieldReader.asReader(fields);
 
     return new AppendOnlyTreeSnapshot(reader.readField(), Number(reader.readField().toBigInt()));
-  }
-
-  static fromViem(snapshot: ViemAppendOnlyTreeSnapshot) {
-    return new AppendOnlyTreeSnapshot(Fr.fromString(snapshot.root), snapshot.nextAvailableLeafIndex);
-  }
-
-  toViem(): ViemAppendOnlyTreeSnapshot {
-    return {
-      root: this.root.toString(),
-      nextAvailableLeafIndex: this.nextAvailableLeafIndex,
-    };
   }
 
   toAbi(): [`0x${string}`, number] {

@@ -59,13 +59,10 @@ template <IsUltraOrMegaHonk Flavor_> class ProverInstance_ {
 
     HonkProof ipa_proof; // utilized only for UltraRollupFlavor
 
-    bool is_complete = false; // whether this instance has been completely populated
     std::vector<uint32_t> memory_read_records;
     std::vector<uint32_t> memory_write_records;
 
     CommitmentKey commitment_key;
-
-    ActiveRegionData active_region_data; // specifies active regions of execution trace
 
     void set_dyadic_size(size_t size) { metadata.dyadic_size = size; }
     void set_final_active_wire_idx(size_t idx) { final_active_wire_idx = idx; }
@@ -106,9 +103,8 @@ template <IsUltraOrMegaHonk Flavor_> class ProverInstance_ {
         // or all pairing points have been aggregated into a single equivalence class
         BB_ASSERT(circuit.pairing_points_tagging.has_single_pairing_point_tag(),
                   "Pairing points must all be aggregated together. Either no pairing points should be created, or "
-                  "all created pairing points must be aggregated into a single pairing point. Found ",
-                  circuit.pairing_points_tagging.num_unique_pairing_points(),
-                  " different pairing points.");
+                  "all created pairing points must be aggregated into a single pairing point. Found "
+                      << circuit.pairing_points_tagging.num_unique_pairing_points() << " different pairing points.");
         // Check pairing point tagging: check that the pairing points have been set to public
         BB_ASSERT(circuit.pairing_points_tagging.has_public_pairing_points() ||
                       !circuit.pairing_points_tagging.has_pairing_points(),
@@ -158,7 +154,7 @@ template <IsUltraOrMegaHonk Flavor_> class ProverInstance_ {
 
         // Construct and add to proving key the wire, selector and copy constraint polynomials
         vinfo("populating trace...");
-        Trace::populate(circuit, polynomials, active_region_data);
+        Trace::populate(circuit, polynomials);
 
         {
             BB_BENCH_NAME("constructing prover instance after trace populate");

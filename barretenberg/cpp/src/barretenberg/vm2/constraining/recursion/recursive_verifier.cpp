@@ -9,25 +9,26 @@
 #include "barretenberg/honk/proof_system/types/proof.hpp"
 #include "barretenberg/polynomials/polynomial.hpp"
 #include "barretenberg/polynomials/shared_shifted_virtual_zeroes_array.hpp"
-#include "barretenberg/stdlib/primitives/bool/bool.hpp"
 #include "barretenberg/stdlib/primitives/field/field.hpp"
 #include "barretenberg/stdlib/primitives/padding_indicator_array/padding_indicator_array.hpp"
 #include "barretenberg/transcript/transcript.hpp"
 #include "barretenberg/vm2/common/aztec_constants.hpp"
 #include "barretenberg/vm2/common/constants.hpp"
+#include "barretenberg/vm2/constraining/avm_fixed_vk.hpp"
 
 namespace bb::avm2 {
 
-// TODO(#15892): Remove vk argument from all functions once its fixed.
-AvmRecursiveVerifier::AvmRecursiveVerifier(Builder& builder, const std::shared_ptr<VerificationKey>& vkey)
+AvmRecursiveVerifier::AvmRecursiveVerifier(Builder& builder)
     : builder(builder)
-    , key(vkey)
 {
-    // TODO(#15892): Uncomment this when we make the AVM vk and vk
-    // hash fixed.
-    // key->fix_witness();
-    // compute the vk hash from the native vk fields
-    // this->vk_hash.fix_witness();
+    auto native_vk = std::make_shared<NativeVerificationKey>(constraining::AvmFixedVKCommitments::get_all());
+
+    key = std::make_shared<VerificationKey>(&builder, native_vk);
+    key->fix_witness();
+
+    auto native_vk_hash = native_vk->hash();
+    vk_hash = FF::from_witness(&builder, native_vk_hash);
+    vk_hash.fix_witness();
 }
 
 // Evaluate the given public input column over the multivariate challenge points
@@ -68,27 +69,16 @@ AvmRecursiveVerifier::PairingPoints AvmRecursiveVerifier::verify_proof(
 }
 
 // TODO(#991): (see https://github.com/AztecProtocol/barretenberg/issues/991)
-// TODO(#14234)[Unconditional PIs validation]: rename stdlib_proof_with_pi_flag to stdlib_proof
 AvmRecursiveVerifier::PairingPoints AvmRecursiveVerifier::verify_proof(
-    const stdlib::Proof<Builder>& stdlib_proof_with_pi_flag, const std::vector<std::vector<FF>>& public_inputs)
+    const stdlib::Proof<Builder>& stdlib_proof, const std::vector<std::vector<FF>>& public_inputs)
 {
     using Curve = typename Flavor::Curve;
     using PCS = typename Flavor::PCS;
     using VerifierCommitments = typename Flavor::VerifierCommitments;
     using RelationParams = RelationParameters<typename Flavor::FF>;
-    using Shplemini = ShpleminiVerifier_<Curve>;
+    using Shplemini = ShpleminiVerifier_<Curve, Flavor::HasZK>;
     using ClaimBatcher = ClaimBatcher_<Curve>;
     using ClaimBatch = ClaimBatcher::Batch;
-    using stdlib::bool_t;
-
-    // TODO(#14234)[Unconditional PIs validation]: Remove the next 3 lines
-    StdlibProof stdlib_proof = stdlib_proof_with_pi_flag;
-    bool_t<Builder> pi_validation = !bool_t<Builder>(stdlib_proof.at(0));
-    // TODO(https://github.com/AztecProtocol/aztec-packages/issues/16716) Origin Tag security mechanism is screaming
-    // that there is a free witness affecting proof verificaton. Because it is and this bool allows completely disabling
-    // public input logic. So this has to be removed in the future.
-    pi_validation.unset_free_witness_tag();
-    stdlib_proof.erase(stdlib_proof.begin());
 
     if (public_inputs.size() != AVM_NUM_PUBLIC_INPUT_COLUMNS) {
         throw_or_abort("AvmRecursiveVerifier::verify_proof: public inputs size mismatch");
@@ -101,34 +91,18 @@ AvmRecursiveVerifier::PairingPoints AvmRecursiveVerifier::verify_proof(
 
     transcript->load_proof(stdlib_proof);
 
-    // TODO(#15892): Fiat-Shamir the vk hash by uncommenting the add_to_hash_buffer.
-    // transcript->add_to_hash_buffer("avm_vk_hash", vk_hash);
-    // TODO(https://github.com/AztecProtocol/aztec-packages/issues/16716) For now we are unsetting the free witness tags
-    // to stop triggering the Origin Tag security mechanism, but the problem is that the VK is not hashed.
-    for (auto& comm : key->get_all()) {
-        comm.unset_free_witness_tag();
-    }
+    transcript->add_to_hash_buffer("avm_vk_hash", vk_hash);
 
-    info("AVM vk hash in recursive verifier: ", vk_hash);
+    info("AVM vk hash in recursive verifier: ", vk_hash.get_value());
 
     RelationParams relation_parameters;
     VerifierCommitments commitments{ key };
 
-    // TODO(https://github.com/AztecProtocol/aztec-packages/pull/17045): make the protocols secure at some point
-    // // Add public inputs to transcript
-    // for (size_t i = 0; i < AVM_NUM_PUBLIC_INPUT_COLUMNS; i++) {
-    //     for (size_t j = 0; j < public_inputs[i].size(); j++) {
-    //         transcript->add_to_hash_buffer("public_input_" + std::to_string(i) + "_" + std::to_string(j),
-    //                                        public_inputs[i][j]);
-    //     }
-    // }
-
+    // Add public inputs to transcript for Fiat-Shamir
     for (size_t i = 0; i < AVM_NUM_PUBLIC_INPUT_COLUMNS; i++) {
         for (size_t j = 0; j < public_inputs[i].size(); j++) {
-            // TODO(https://github.com/AztecProtocol/aztec-packages/pull/17045): make the protocols secure at some point
-            // transcript->add_to_hash_buffer("public_input_" + std::to_string(i) + "_" + std::to_string(j),
-            //                               public_inputs[i][j]);
-            public_inputs[i][j].unset_free_witness_tag();
+            transcript->add_to_hash_buffer("public_input_" + std::to_string(i) + "_" + std::to_string(j),
+                                           public_inputs[i][j]);
         }
     }
     // Get commitments to VM wires
@@ -172,12 +146,11 @@ AvmRecursiveVerifier::PairingPoints AvmRecursiveVerifier::verify_proof(
         output.claimed_evaluations.get(C::public_inputs_cols_3_),
     };
 
-    // TODO(#14234)[Unconditional PIs validation]: Inside of loop, replace pi_validation.must_imply() by
-    // public_input_evaluation.assert_equal(claimed_evaluations[i]
+    // Validate public inputs match the claimed evaluations
     for (size_t i = 0; i < AVM_NUM_PUBLIC_INPUT_COLUMNS; i++) {
         FF public_input_evaluation = evaluate_public_input_column(public_inputs[i], output.challenge);
-        pi_validation.must_imply(public_input_evaluation == claimed_evaluations[i],
-                                 format("public_input_evaluation failed at column ", i));
+        public_input_evaluation.assert_equal(claimed_evaluations[i],
+                                             format("public_input_evaluation failed at column ", i));
     }
 
     // Batch commitments and evaluations using short scalars to reduce ECCVM circuit size
@@ -224,10 +197,12 @@ AvmRecursiveVerifier::PairingPoints AvmRecursiveVerifier::verify_proof(
                                                                   .evaluations = RefVector(squashed_unshifted_eval) },
                                          .shifted = ClaimBatch{ .commitments = RefVector(squashed_shifted),
                                                                 .evaluations = RefVector(squashed_shifted_eval) } };
-    const BatchOpeningClaim<Curve> opening_claim = Shplemini::compute_batch_opening_claim(
-        padding_indicator_array, squashed_claim_batcher, output.challenge, Commitment::one(&builder), transcript);
+    auto opening_claim =
+        Shplemini::compute_batch_opening_claim(
+            padding_indicator_array, squashed_claim_batcher, output.challenge, Commitment::one(&builder), transcript)
+            .batch_opening_claim;
 
-    PairingPoints pairing_points(PCS::reduce_verify_batch_opening_claim(opening_claim, transcript));
+    PairingPoints pairing_points(PCS::reduce_verify_batch_opening_claim(std::move(opening_claim), transcript));
 
     if (builder.failed()) {
         info("AVM Recursive verifier builder failed with error: ", builder.err());

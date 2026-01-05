@@ -1,5 +1,6 @@
 #pragma once
 
+#include "barretenberg/dsl/acir_format/test_class_predicate.hpp"
 #include "barretenberg/stdlib/primitives/circuit_builders/circuit_builders.hpp"
 #include "barretenberg/stdlib_circuit_builders/mega_circuit_builder.hpp"
 #include "barretenberg/stdlib_circuit_builders/ultra_circuit_builder.hpp"
@@ -23,7 +24,8 @@ inline constexpr size_t ZERO_GATE = 1;
 template <typename Builder> inline constexpr size_t ARITHMETIC_TRIPLE = 1 + ZERO_GATE + MEGA_OFFSET<Builder>;
 template <typename Builder> inline constexpr size_t QUAD = 1 + ZERO_GATE + MEGA_OFFSET<Builder>;
 template <typename Builder> inline constexpr size_t BIG_QUAD = 2 + ZERO_GATE + MEGA_OFFSET<Builder>;
-template <typename Builder> inline constexpr size_t LOGIC_XOR_32 = 2950 + ZERO_GATE + MEGA_OFFSET<Builder>;
+template <typename Builder> inline constexpr size_t LOGIC_XOR_32 = 6 + ZERO_GATE + MEGA_OFFSET<Builder>;
+template <typename Builder> inline constexpr size_t LOGIC_AND_32 = 6 + ZERO_GATE + MEGA_OFFSET<Builder>;
 template <typename Builder> inline constexpr size_t RANGE_32 = 2744 + ZERO_GATE + MEGA_OFFSET<Builder>;
 template <typename Builder> inline constexpr size_t SHA256_COMPRESSION = 6679 + ZERO_GATE + MEGA_OFFSET<Builder>;
 template <typename Builder> inline constexpr size_t AES128_ENCRYPTION = 1432 + ZERO_GATE + MEGA_OFFSET<Builder>;
@@ -36,46 +38,88 @@ template <typename Builder> inline constexpr size_t ECDSA_SECP256K1 = 41994 + ZE
 template <typename Builder>
 inline constexpr size_t ECDSA_SECP256R1 = 72209 + ZERO_GATE + (IsMegaBuilder<Builder> ? 2 : 0);
 
-template <typename Builder> inline constexpr size_t BLAKE2S = 2864 + ZERO_GATE + MEGA_OFFSET<Builder>;
-template <typename Builder> inline constexpr size_t BLAKE3 = 2100 + ZERO_GATE + MEGA_OFFSET<Builder>;
+template <typename Builder> inline constexpr size_t BLAKE2S = 2959 + ZERO_GATE + MEGA_OFFSET<Builder>;
+template <typename Builder> inline constexpr size_t BLAKE3 = 2165 + ZERO_GATE + MEGA_OFFSET<Builder>;
 template <typename Builder> inline constexpr size_t KECCAK_PERMUTATION = 17387 + ZERO_GATE + MEGA_OFFSET<Builder>;
 template <typename Builder> inline constexpr size_t POSEIDON2_PERMUTATION = 73 + ZERO_GATE + MEGA_OFFSET<Builder>;
 template <typename Builder> inline constexpr size_t MULTI_SCALAR_MUL = 3550 + ZERO_GATE;
 template <typename Builder> inline constexpr size_t EC_ADD = 66 + ZERO_GATE + MEGA_OFFSET<Builder>;
 template <typename Builder> inline constexpr size_t BLOCK_ROM_READ = 9 + ZERO_GATE + MEGA_OFFSET<Builder>;
+template <typename Builder> inline constexpr size_t BLOCK_RAM_READ = 18 + ZERO_GATE + MEGA_OFFSET<Builder>;
+template <typename Builder> inline constexpr size_t BLOCK_RAM_WRITE = 18 + ZERO_GATE + MEGA_OFFSET<Builder>;
+template <typename Builder> inline constexpr size_t BLOCK_CALLDATA = 1 + ZERO_GATE + MEGA_OFFSET<Builder>;
+template <typename Builder> inline constexpr size_t BLOCK_RETURNDATA = 23 + ZERO_GATE + MEGA_OFFSET<Builder>;
+template <typename Builder> inline constexpr size_t ASSERT_EQUALITY = ZERO_GATE + MEGA_OFFSET<Builder>;
 
 // ========================================
 // Honk Recursion Constants
 // ========================================
 
-// Gate counts for Honk recursion vary by recursive flavor
-// Returns tuple of (gate_count, ecc_rows, ultra_ops)
+inline constexpr size_t ROOT_ROLLUP_GATE_COUNT = 12986977;
+
 template <typename RecursiveFlavor>
-inline constexpr std::tuple<size_t, size_t, size_t> HONK_RECURSION_CONSTANTS = []() {
+constexpr std::tuple<size_t, size_t> HONK_RECURSION_CONSTANTS(
+    const PredicateTestCase& mode = PredicateTestCase::ConstantTrue)
+{
     using UltraCircuitBuilder = bb::UltraCircuitBuilder;
     using MegaCircuitBuilder = bb::MegaCircuitBuilder;
 
     if constexpr (std::is_same_v<RecursiveFlavor, bb::UltraRecursiveFlavor_<UltraCircuitBuilder>>) {
-        return std::make_tuple(723995, 0, 0);
-    } else if constexpr (std::is_same_v<RecursiveFlavor, bb::UltraRollupRecursiveFlavor_<UltraCircuitBuilder>>) {
-        return std::make_tuple(724462, 0, 0);
-    } else if constexpr (std::is_same_v<RecursiveFlavor, bb::UltraRecursiveFlavor_<MegaCircuitBuilder>>) {
-        return std::make_tuple(24329, 1250, 76);
+        switch (mode) {
+        case PredicateTestCase::ConstantTrue:
+            return std::make_tuple(722844, 0);
+        case PredicateTestCase::WitnessTrue:
+        case PredicateTestCase::WitnessFalse:
+            return std::make_tuple(723995, 0);
+        }
     } else if constexpr (std::is_same_v<RecursiveFlavor, bb::UltraZKRecursiveFlavor_<UltraCircuitBuilder>>) {
-        return std::make_tuple(767515, 0, 0);
+        switch (mode) {
+        case PredicateTestCase::ConstantTrue:
+            return std::make_tuple(766262, 0);
+        case PredicateTestCase::WitnessTrue:
+        case PredicateTestCase::WitnessFalse:
+            return std::make_tuple(767515, 0);
+        }
+    } else if constexpr (std::is_same_v<RecursiveFlavor, bb::UltraRollupRecursiveFlavor_<UltraCircuitBuilder>>) {
+        switch (mode) {
+        case PredicateTestCase::ConstantTrue:
+            return std::make_tuple(723163, 0);
+        case PredicateTestCase::WitnessTrue:
+        case PredicateTestCase::WitnessFalse:
+            return std::make_tuple(724462, 0);
+        }
+    } else if constexpr (std::is_same_v<RecursiveFlavor, bb::UltraRecursiveFlavor_<MegaCircuitBuilder>>) {
+        switch (mode) {
+        case PredicateTestCase::ConstantTrue:
+            return std::make_tuple(23178, 76);
+        case PredicateTestCase::WitnessTrue:
+        case PredicateTestCase::WitnessFalse:
+            return std::make_tuple(24329, 76);
+        }
     } else if constexpr (std::is_same_v<RecursiveFlavor, bb::UltraZKRecursiveFlavor_<MegaCircuitBuilder>>) {
-        return std::make_tuple(29302, 1052, 80);
+        switch (mode) {
+        case PredicateTestCase::ConstantTrue:
+            return std::make_tuple(28049, 80);
+        case PredicateTestCase::WitnessTrue:
+        case PredicateTestCase::WitnessFalse:
+            return std::make_tuple(29302, 80);
+        }
+    } else if constexpr (std::is_same_v<RecursiveFlavor, bb::MegaZKRecursiveFlavor_<UltraCircuitBuilder>>) {
+        if (mode != PredicateTestCase::ConstantTrue) {
+            bb::assert_failure("Unhandled mode in MegaZKRecursiveFlavor.");
+        }
+        return std::make_tuple(814519, 0);
     } else {
         bb::assert_failure("Unhandled recursive flavor.");
     }
-}();
+}
 
 // ========================================
 // Chonk Recursion Constants
 // ========================================
 
 // Gate count for Chonk recursive verification (UltraRollup builder)
-inline constexpr size_t CHONK_RECURSION_GATES = 2540865;
+inline constexpr size_t CHONK_RECURSION_GATES = 2368439;
 
 // ========================================
 // Hypernova Recursion Constants
@@ -85,23 +129,37 @@ inline constexpr size_t CHONK_RECURSION_GATES = 2540865;
 inline constexpr size_t MSM_ROWS_OFFSET = 2;
 
 // Init kernel gate counts (verifies OINK proof)
-inline constexpr size_t INIT_KERNEL_GATE_COUNT = 26038;
+inline constexpr size_t INIT_KERNEL_GATE_COUNT = 26036;
 inline constexpr size_t INIT_KERNEL_ECC_ROWS = 881 + MSM_ROWS_OFFSET;
 inline constexpr size_t INIT_KERNEL_ULTRA_OPS = 89;
 
 // Inner kernel gate counts (verifies HN proof for previous kernel + HN for app)
-inline constexpr size_t INNER_KERNEL_GATE_COUNT_HN = 61020;
+inline constexpr size_t INNER_KERNEL_GATE_COUNT_HN = 61018;
 inline constexpr size_t INNER_KERNEL_ECC_ROWS = 1700 + MSM_ROWS_OFFSET;
 inline constexpr size_t INNER_KERNEL_ULTRA_OPS = 179;
 
 // Tail kernel gate counts (verifies HN_TAIL proof)
-inline constexpr size_t TAIL_KERNEL_GATE_COUNT = 33968;
+inline constexpr size_t TAIL_KERNEL_GATE_COUNT = 33966;
 inline constexpr size_t TAIL_KERNEL_ECC_ROWS = 914 + MSM_ROWS_OFFSET;
-inline constexpr size_t TAIL_KERNEL_ULTRA_OPS = 95;
+inline constexpr size_t TAIL_KERNEL_ULTRA_OPS = 96;
 
 // Hiding kernel gate counts (verifies HN_FINAL proof)
-inline constexpr size_t HIDING_KERNEL_GATE_COUNT = 37212;
-inline constexpr size_t HIDING_KERNEL_ECC_ROWS = 1405 + MSM_ROWS_OFFSET;
-inline constexpr size_t HIDING_KERNEL_ULTRA_OPS = 126;
+inline constexpr size_t HIDING_KERNEL_GATE_COUNT = 37106;
+inline constexpr size_t HIDING_KERNEL_ECC_ROWS = 1341 + MSM_ROWS_OFFSET;
+inline constexpr size_t HIDING_KERNEL_ULTRA_OPS = 124;
+
+// ========================================
+// ECCVM Recursive Verifier Constants
+// ========================================
+
+// Gate count for ECCVM recursive verifier (Ultra-arithmetized)
+inline constexpr size_t ECCVM_RECURSIVE_VERIFIER_GATE_COUNT = 214950;
+
+// ========================================
+// Goblin AVM Recursive Verifier Constants
+// ========================================
+
+inline constexpr size_t GOBLIN_AVM_GATE_COUNT = 3325906;
+inline constexpr size_t FINALIZED_GOBLIN_AVM_GATE_COUNT = 3325922;
 
 } // namespace acir_format

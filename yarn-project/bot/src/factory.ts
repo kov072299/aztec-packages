@@ -11,14 +11,17 @@ import {
 import { L1FeeJuicePortalManager } from '@aztec/aztec.js/ethereum';
 import type { L2AmountClaim } from '@aztec/aztec.js/ethereum';
 import { FeeJuicePaymentMethodWithClaim } from '@aztec/aztec.js/fee';
+import { deriveKeys } from '@aztec/aztec.js/keys';
 import { createLogger } from '@aztec/aztec.js/log';
 import { waitForL1ToL2MessageReady } from '@aztec/aztec.js/messaging';
-import { createEthereumChain, createExtendedL1Client } from '@aztec/ethereum';
-import { Fr } from '@aztec/foundation/fields';
+import { createEthereumChain } from '@aztec/ethereum/chain';
+import { createExtendedL1Client } from '@aztec/ethereum/client';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { Timer } from '@aztec/foundation/timer';
 import { AMMContract } from '@aztec/noir-contracts.js/AMM';
 import { PrivateTokenContract } from '@aztec/noir-contracts.js/PrivateToken';
 import { TokenContract } from '@aztec/noir-contracts.js/Token';
+import type { ContractInstanceWithAddress } from '@aztec/stdlib/contract';
 import { GasSettings } from '@aztec/stdlib/gas';
 import type { AztecNode, AztecNodeAdmin } from '@aztec/stdlib/interfaces/client';
 import { deriveSigningKey } from '@aztec/stdlib/keys';
@@ -46,7 +49,13 @@ export class BotFactory {
    * Initializes a new bot by setting up the sender account, registering the recipient,
    * deploying the token contract, and minting tokens if necessary.
    */
-  public async setup() {
+  public async setup(): Promise<{
+    wallet: TestWallet;
+    defaultAccountAddress: AztecAddress;
+    token: TokenContract | PrivateTokenContract;
+    node: AztecNode;
+    recipient: AztecAddress;
+  }> {
     const recipient = (await this.wallet.createAccount()).address;
     const defaultAccountAddress = await this.setupAccount();
     const token = await this.setupToken(defaultAccountAddress);
@@ -54,7 +63,14 @@ export class BotFactory {
     return { wallet: this.wallet, defaultAccountAddress, token, node: this.aztecNode, recipient };
   }
 
-  public async setupAmm() {
+  public async setupAmm(): Promise<{
+    wallet: TestWallet;
+    defaultAccountAddress: AztecAddress;
+    amm: AMMContract;
+    token0: TokenContract;
+    token1: TokenContract;
+    node: AztecNode;
+  }> {
     const defaultAccountAddress = await this.setupAccount();
     const token0 = await this.setupTokenContract(defaultAccountAddress, this.config.tokenSalt, 'BotToken0', 'BOT0');
     const token1 = await this.setupTokenContract(defaultAccountAddress, this.config.tokenSalt, 'BotToken1', 'BOT1');
@@ -151,6 +167,7 @@ export class BotFactory {
    */
   private async setupToken(sender: AztecAddress): Promise<TokenContract | PrivateTokenContract> {
     let deploy: DeployMethod<TokenContract | PrivateTokenContract>;
+    let tokenInstance: ContractInstanceWithAddress | undefined;
     const deployOpts: DeployOptions = {
       from: sender,
       contractAddressSalt: this.config.tokenSalt,
@@ -159,15 +176,22 @@ export class BotFactory {
     if (this.config.contract === SupportedTokenContracts.TokenContract) {
       deploy = TokenContract.deploy(this.wallet, sender, 'BotToken', 'BOT', 18);
     } else if (this.config.contract === SupportedTokenContracts.PrivateTokenContract) {
-      deploy = PrivateTokenContract.deploy(this.wallet, MINT_BALANCE, sender);
+      // Generate keys for the contract since PrivateToken uses SinglePrivateMutable which requires keys
+      const tokenSecretKey = Fr.random();
+      const tokenPublicKeys = (await deriveKeys(tokenSecretKey)).publicKeys;
+      deploy = PrivateTokenContract.deployWithPublicKeys(tokenPublicKeys, this.wallet, MINT_BALANCE, sender);
       deployOpts.skipInstancePublication = true;
       deployOpts.skipClassPublication = true;
       deployOpts.skipInitialization = false;
+
+      // Register the contract with the secret key before deployment
+      tokenInstance = await deploy.getInstance(deployOpts);
+      await this.wallet.registerContract(tokenInstance, PrivateTokenContract.artifact, tokenSecretKey);
     } else {
       throw new Error(`Unsupported token contract type: ${this.config.contract}`);
     }
 
-    const address = (await deploy.getInstance(deployOpts)).address;
+    const address = tokenInstance?.address ?? (await deploy.getInstance(deployOpts)).address;
     if ((await this.wallet.getContractMetadata(address)).isContractPublished) {
       this.log.info(`Token at ${address.toString()} already deployed`);
       return deploy.register();

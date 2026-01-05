@@ -1,7 +1,10 @@
+import type { FileStoreBlobClient } from '@aztec/blob-client/filestore';
+import { getBlobsPerL1Block } from '@aztec/blob-lib';
 import type { EpochCache } from '@aztec/epoch-cache';
+import { BlockNumber, EpochNumber } from '@aztec/foundation/branded-types';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import type { EthAddress } from '@aztec/foundation/eth-address';
 import type { Signature } from '@aztec/foundation/eth-signature';
-import { Fr } from '@aztec/foundation/fields';
 import { type Logger, createLogger } from '@aztec/foundation/log';
 import { RunningPromise } from '@aztec/foundation/running-promise';
 import { sleep } from '@aztec/foundation/sleep';
@@ -16,9 +19,9 @@ import type { IFullNodeBlockBuilder, Validator, ValidatorClientFullConfig } from
 import type { L1ToL2MessageSource } from '@aztec/stdlib/messaging';
 import type { BlockAttestation, BlockProposal, BlockProposalOptions } from '@aztec/stdlib/p2p';
 import type { CheckpointHeader } from '@aztec/stdlib/rollup';
-import type { StateReference, Tx } from '@aztec/stdlib/tx';
+import type { Tx } from '@aztec/stdlib/tx';
 import { AttestationTimeoutError } from '@aztec/stdlib/validators';
-import { type TelemetryClient, type Tracer, getTelemetryClient } from '@aztec/telemetry-client';
+import { Attributes, type TelemetryClient, type Tracer, getTelemetryClient, trackSpan } from '@aztec/telemetry-client';
 
 import { EventEmitter } from 'events';
 import type { TypedDataDefinition } from 'viem';
@@ -53,7 +56,7 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
   // Used to check if we are sending the same proposal twice
   private previousProposal?: BlockProposal;
 
-  private lastEpochForCommitteeUpdateLoop: bigint | undefined;
+  private lastEpochForCommitteeUpdateLoop: EpochNumber | undefined;
   private epochCacheUpdateLoop: RunningPromise;
 
   private proposersOfInvalidBlocks: Set<string> = new Set();
@@ -64,6 +67,7 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
     private p2pClient: P2P,
     private blockProposalHandler: BlockProposalHandler,
     private config: ValidatorClientFullConfig,
+    private fileStoreBlobUploadClient: FileStoreBlobClient | undefined,
     private dateProvider: DateProvider = new DateProvider(),
     telemetry: TelemetryClient = getTelemetryClient(),
     log = createLogger('validator'),
@@ -146,6 +150,7 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
     l1ToL2MessageSource: L1ToL2MessageSource,
     txProvider: TxProvider,
     keyStoreManager: KeystoreManager,
+    fileStoreBlobUploadClient?: FileStoreBlobClient,
     dateProvider: DateProvider = new DateProvider(),
     telemetry: TelemetryClient = getTelemetryClient(),
   ) {
@@ -171,6 +176,7 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
       p2pClient,
       blockProposalHandler,
       config,
+      fileStoreBlobUploadClient,
       dateProvider,
       telemetry,
     );
@@ -191,7 +197,7 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
   // Proxy method for backwards compatibility with tests
   public reExecuteTransactions(
     proposal: BlockProposal,
-    blockNumber: number,
+    blockNumber: BlockNumber,
     txs: any[],
     l1ToL2Messages: Fr[],
   ): Promise<any> {
@@ -228,14 +234,9 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
 
     const myAddresses = this.getValidatorAddresses();
     const inCommittee = await this.epochCache.filterInCommittee('now', myAddresses);
+    this.log.info(`Started validator with addresses: ${myAddresses.map(a => a.toString()).join(', ')}`);
     if (inCommittee.length > 0) {
-      this.log.info(
-        `Started validator with addresses in current validator committee: ${inCommittee
-          .map(a => a.toString())
-          .join(', ')}`,
-      );
-    } else {
-      this.log.info(`Started validator with addresses: ${myAddresses.map(a => a.toString()).join(', ')}`);
+      this.log.info(`Addresses in current validator committee: ${inCommittee.map(a => a.toString()).join(', ')}`);
     }
     this.epochCacheUpdateLoop.start();
 
@@ -263,8 +264,12 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
     }
   }
 
+  @trackSpan('validator.attestToProposal', (proposal, proposalSender) => ({
+    [Attributes.BLOCK_HASH]: proposal.payload.header.hash.toString(),
+    [Attributes.PEER_ID]: proposalSender.toString(),
+  }))
   async attestToProposal(proposal: BlockProposal, proposalSender: PeerId): Promise<BlockAttestation[] | undefined> {
-    const slotNumber = proposal.slotNumber.toBigInt();
+    const slotNumber = proposal.slotNumber;
     const proposer = proposal.getSender();
 
     // Reject proposals with invalid signatures
@@ -293,7 +298,8 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
       fishermanMode ||
       (slashBroadcastedInvalidBlockPenalty > 0n && validatorReexecute) ||
       (partOfCommittee && validatorReexecute) ||
-      alwaysReexecuteBlockProposals;
+      alwaysReexecuteBlockProposals ||
+      this.fileStoreBlobUploadClient;
 
     const validationResult = await this.blockProposalHandler.handleBlockProposal(
       proposal,
@@ -349,6 +355,20 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
 
     this.metrics.incSuccessfulAttestations(inCommittee.length);
 
+    // Upload blobs to filestore after successful re-execution (fire-and-forget)
+    if (validationResult.reexecutionResult?.block && this.fileStoreBlobUploadClient) {
+      void Promise.resolve().then(async () => {
+        try {
+          const blobFields = validationResult.reexecutionResult!.block.getCheckpointBlobFields();
+          const blobs = getBlobsPerL1Block(blobFields);
+          await this.fileStoreBlobUploadClient!.saveBlobs(blobs, true);
+          this.log.debug(`Uploaded ${blobs.length} blobs to filestore from re-execution`, proposalInfo);
+        } catch (err) {
+          this.log.warn(`Failed to upload blobs from re-execution`, err);
+        }
+      });
+    }
+
     // If the above function does not throw an error, then we can attest to the proposal
     // Determine which validators should attest
     let attestors: EthAddress[];
@@ -399,35 +419,45 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
         validator: proposer,
         amount: this.config.slashBroadcastedInvalidBlockPenalty,
         offenseType: OffenseType.BROADCASTED_INVALID_BLOCK_PROPOSAL,
-        epochOrSlot: proposal.slotNumber.toBigInt(),
+        epochOrSlot: BigInt(proposal.slotNumber),
       },
     ]);
   }
 
+  // TODO(palla/mbps): Block proposal should not require a checkpoint proposal
   async createBlockProposal(
-    blockNumber: number,
+    blockNumber: BlockNumber,
     header: CheckpointHeader,
     archive: Fr,
-    stateReference: StateReference,
     txs: Tx[],
     proposerAddress: EthAddress | undefined,
     options: BlockProposalOptions,
-  ): Promise<BlockProposal | undefined> {
-    if (this.previousProposal?.slotNumber.equals(header.slotNumber)) {
-      this.log.verbose(`Already made a proposal for the same slot, skipping proposal`);
-      return Promise.resolve(undefined);
-    }
+  ): Promise<BlockProposal> {
+    // TODO(palla/mbps): Prevent double proposals properly
+    // if (this.previousProposal?.slotNumber === header.slotNumber) {
+    //   this.log.verbose(`Already made a proposal for the same slot, skipping proposal`);
+    //   return Promise.resolve(undefined);
+    // }
 
-    const newProposal = await this.validationService.createBlockProposal(
-      header,
-      archive,
-      stateReference,
-      txs,
-      proposerAddress,
-      { ...options, broadcastInvalidBlockProposal: this.config.broadcastInvalidBlockProposal },
-    );
+    this.log.info(`Assembling block proposal for block ${blockNumber} slot ${header.slotNumber}`);
+    const newProposal = await this.validationService.createBlockProposal(header, archive, txs, proposerAddress, {
+      ...options,
+      broadcastInvalidBlockProposal: this.config.broadcastInvalidBlockProposal,
+    });
     this.previousProposal = newProposal;
     return newProposal;
+  }
+
+  // TODO(palla/mbps): Effectively create a checkpoint proposal different from a block proposal
+  createCheckpointProposal(
+    header: CheckpointHeader,
+    archive: Fr,
+    txs: Tx[],
+    proposerAddress: EthAddress | undefined,
+    options: BlockProposalOptions,
+  ): Promise<BlockProposal> {
+    this.log.info(`Assembling checkpoint proposal for slot ${header.slotNumber}`);
+    return this.createBlockProposal(0 as BlockNumber, header, archive, txs, proposerAddress, options);
   }
 
   async broadcastBlockProposal(proposal: BlockProposal): Promise<void> {
@@ -442,7 +472,7 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
   }
 
   async collectOwnAttestations(proposal: BlockProposal): Promise<BlockAttestation[]> {
-    const slot = proposal.payload.header.slotNumber.toBigInt();
+    const slot = proposal.payload.header.slotNumber;
     const inCommittee = await this.epochCache.filterInCommittee(slot, this.getValidatorAddresses());
     this.log.debug(`Collecting ${inCommittee.length} self-attestations for slot ${slot}`, { inCommittee });
     const attestations = await this.createBlockAttestationsFromProposal(proposal, inCommittee);
@@ -458,7 +488,7 @@ export class ValidatorClient extends (EventEmitter as new () => WatcherEmitter) 
 
   async collectAttestations(proposal: BlockProposal, required: number, deadline: Date): Promise<BlockAttestation[]> {
     // Wait and poll the p2pClient's attestation pool for this block until we have enough attestations
-    const slot = proposal.payload.header.slotNumber.toBigInt();
+    const slot = proposal.payload.header.slotNumber;
     this.log.debug(`Collecting ${required} attestations for slot ${slot} with deadline ${deadline.toISOString()}`);
 
     if (+deadline < this.dateProvider.now()) {

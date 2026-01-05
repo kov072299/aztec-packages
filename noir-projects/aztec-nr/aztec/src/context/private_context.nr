@@ -2,7 +2,7 @@ use crate::{
     context::{
         inputs::PrivateContextInputs, note_hash_read::NoteHashRead, returns_hash::ReturnsHash,
     },
-    hash::{hash_args_array, hash_calldata_array},
+    hash::{hash_args, hash_calldata_array},
     keys::constants::{NULLIFIER_INDEX, NUM_KEY_TYPES, OUTGOING_INDEX, sk_generators},
     messaging::process_l1_to_l2_message,
     oracle::{
@@ -572,7 +572,7 @@ impl PrivateContext {
     /// * `serialized_return_values` - The serialized return values as a field array
     ///
     pub fn set_return_hash<let N: u32>(&mut self, serialized_return_values: [Field; N]) {
-        let return_hash = hash_args_array(serialized_return_values);
+        let return_hash = hash_args(serialized_return_values);
         self.return_hash = return_hash;
         execution_cache::store(serialized_return_values, return_hash);
     }
@@ -695,7 +695,7 @@ impl PrivateContext {
         //     "Ending setup at counter {0}",
         //     [self.side_effect_counter as Field]
         // );
-        self.min_revertible_side_effect_counter = self.side_effect_counter;
+        self.min_revertible_side_effect_counter = self.next_counter();
         notify_set_min_revertible_side_effect_counter(self.min_revertible_side_effect_counter);
     }
 
@@ -734,8 +734,8 @@ impl PrivateContext {
     ///   publicly-known value (e.g. the time when a contract upgrades), then
     ///   the wallet might wish to set an even lower one to avoid revealing that
     ///   this tx is interacting with said contract.
-    ///   Ideally, all wallets should standardise on an approach in order to
-    ///   provide users with a large anonymity set -- although the exact apprach
+    ///   Ideally, all wallets should standardize on an approach in order to
+    ///   provide users with a large anonymity set -- although the exact approach
     ///   will need to be discussed. Wallets that deviate from a standard might
     ///   accidentally reveal which wallet each transaction originates from.
     ///
@@ -922,7 +922,7 @@ impl PrivateContext {
     /// offchain zero-knowledge proofs. It is up to an app developer whether
     /// they choose to make use of a user's outgoing keypair within their
     /// application logic, or instead simply use the same keypair (the address
-    /// keypair (which is effectively the same as the "incooming" keypair)) for
+    /// keypair (which is effectively the same as the "incoming" keypair)) for
     /// all incoming & outgoing messages to a user.
     ///
     /// Currently, all of the exposed encryption functions in aztec-nr ignore
@@ -1240,13 +1240,13 @@ impl PrivateContext {
     ///   of the transaction, so devs should be careful in their contract
     ///   designs. If it can be done in a private function, then that will give
     ///   the best privacy.
-    /// - Not padding the side-effects of a tx to some standardised, uniform
+    /// - Not padding the side-effects of a tx to some standardized, uniform
     ///   size. The kernel circuits can take hints to pad side-effects, so a
     ///   wallet should be able to request for a particular amount of padding.
     ///   Wallets should ideally agree on some standard.
     ///   - Padding should include:
     ///     - Padding the lengths of note & nullifier arrays
-    ///     - Padding private logs with random fields, up to some standardised
+    ///     - Padding private logs with random fields, up to some standardized
     ///       size.
     /// See also: https://docs.aztec.network/developers/resources/considerations/privacy_considerations
     ///
@@ -1263,7 +1263,7 @@ impl PrivateContext {
         function_selector: FunctionSelector,
         args: [Field; ArgsCount],
     ) -> ReturnsHash {
-        let args_hash = hash_args_array(args);
+        let args_hash = hash_args(args);
         execution_cache::store(args, args_hash);
         self.call_private_function_with_args_hash(
             contract_address,
@@ -1297,7 +1297,7 @@ impl PrivateContext {
         function_selector: FunctionSelector,
         args: [Field; ArgsCount],
     ) -> ReturnsHash {
-        let args_hash = hash_args_array(args);
+        let args_hash = hash_args(args);
         execution_cache::store(args, args_hash);
         self.call_private_function_with_args_hash(
             contract_address,

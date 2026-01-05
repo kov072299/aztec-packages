@@ -1,5 +1,5 @@
 import type { AztecNodeService } from '@aztec/aztec-node';
-import { RollupContract } from '@aztec/ethereum';
+import { RollupContract } from '@aztec/ethereum/contracts';
 import { EthAddress } from '@aztec/foundation/eth-address';
 import { retryUntil } from '@aztec/foundation/retry';
 import { tryStop } from '@aztec/stdlib/interfaces/server';
@@ -100,7 +100,7 @@ describe('e2e_p2p_multiple_validators_sentinel', () => {
 
   it('collects attestations for all validators on a node', async () => {
     await t.monitor.run();
-    const { l2BlockNumber: initialBlock, l2SlotNumber: initialSlot } = t.monitor;
+    const { checkpointNumber: initialBlock, l2SlotNumber: initialSlot } = t.monitor;
 
     const timeout = AZTEC_SLOT_DURATION * SLOT_COUNT * 4;
     const targetSlot = Number(initialSlot) + SLOT_COUNT;
@@ -120,7 +120,7 @@ describe('e2e_p2p_multiple_validators_sentinel', () => {
 
     for (const node of [...nodes, sentinel]) {
       const stats = await node.getValidatorsStats();
-      t.logger.info(`Collected validator stats at block ${t.monitor.l2BlockNumber}`, { stats });
+      t.logger.info(`Collected validator stats at block ${t.monitor.checkpointNumber}`, { stats });
 
       // Check that all validators have attestations recorded
       for (let i = 0; i < VALIDATORS_PER_NODE * NUM_NODES; i++) {
@@ -134,11 +134,14 @@ describe('e2e_p2p_multiple_validators_sentinel', () => {
   });
 
   it('collects attestations for validators in proposer node when block is not published', async () => {
-    // Stop the second node, this means the first block won't be able to propose
+    // Ensure all nodes see each other, especially the sentinel
+    await t.waitForP2PMeshConnectivity([...nodes, sentinel]);
+
+    // Stop the second node, this means the first node won't be able to propose since won't achieve quorum
     await tryStop(nodes[1]);
 
     await t.monitor.run();
-    const { l2BlockNumber: initialBlock, l2SlotNumber: initialSlot } = t.monitor;
+    const { checkpointNumber: initialBlock, l2SlotNumber: initialSlot } = t.monitor;
 
     const timeout = AZTEC_SLOT_DURATION * SLOT_COUNT * 4;
     const targetSlot = Number(initialSlot) + SLOT_COUNT;
@@ -158,7 +161,7 @@ describe('e2e_p2p_multiple_validators_sentinel', () => {
       ),
     ]);
 
-    const slotForSentinel = t.monitor.l2SlotNumber;
+    const slotForSentinel = (await t.monitor.run()).l2SlotNumber;
     t.logger.info(`Waiting until sentinel processed until slot ${slotForSentinel}`);
     await retryUntil(
       async () => {
@@ -176,7 +179,7 @@ describe('e2e_p2p_multiple_validators_sentinel', () => {
     // Check that all of the first node validators have attestations recorded
     for (const validator of firstNodeValidators) {
       const validatorStats = stats.stats[validator.toString().toLowerCase()];
-      const history = validatorStats?.history.filter(h => h.slot > initialSlot && h.slot <= targetSlot) ?? [];
+      const history = validatorStats?.history.filter(h => h.slot > initialSlot && h.slot <= slotForSentinel) ?? [];
       t.logger.info(`Asserting stats for online validator ${validator}`, { history });
       expect(history.filter(h => h.status === 'attestation-missed' || h.status === 'block-missed')).toBeEmpty();
     }
@@ -184,14 +187,14 @@ describe('e2e_p2p_multiple_validators_sentinel', () => {
     // At least one of the first node validators must have been seen as proposer
     const firstNodeBlockProposedHistory = firstNodeValidators
       .flatMap(v => stats.stats[v.toString().toLowerCase()].history)
-      .filter(h => h.slot > initialSlot && h.slot <= targetSlot)
+      .filter(h => h.slot > initialSlot && h.slot <= slotForSentinel)
       .filter(h => h.status === 'block-proposed');
     expect(firstNodeBlockProposedHistory).not.toBeEmpty();
 
     // And all of the proposers for the offline node must be seen as missed attestation or proposal
     for (const validator of offlineValidators) {
       const validatorStats = stats.stats[validator.toString().toLowerCase()];
-      const history = validatorStats.history?.filter(h => h.slot > initialSlot && h.slot <= targetSlot) ?? [];
+      const history = validatorStats.history?.filter(h => h.slot > initialSlot && h.slot <= slotForSentinel) ?? [];
       t.logger.info(`Asserting stats for offline validator ${validator}`, { history });
       expect(history.filter(h => h.status === 'attestation-missed' || h.status === 'block-missed')).not.toBeEmpty();
     }

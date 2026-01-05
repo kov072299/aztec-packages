@@ -47,9 +47,8 @@ AvmProver::AvmProver(std::shared_ptr<Flavor::ProvingKey> input_key,
  */
 void AvmProver::execute_preamble_round()
 {
-    // TODO(#15892): Fiat-shamir the vk hash by uncommenting the line below.
     FF vk_hash = vk->hash();
-    // transcript->add_to_hash_buffer("avm_vk_hash", vk_hash);
+    transcript->add_to_hash_buffer("avm_vk_hash", vk_hash);
     info("AVM vk hash in prover: ", vk_hash);
 }
 
@@ -220,9 +219,8 @@ HonkProof AvmProver::construct_proof()
     // Add circuit size public input size and public inputs to transcript.
     execute_preamble_round();
 
-    // TODO(https://github.com/AztecProtocol/aztec-packages/pull/17045): make the protocols secure at some point
-    // // Add public inputs to transcript.
-    // AVM_TRACK_TIME("prove/public_inputs_round", execute_public_inputs_round());
+    // Add public inputs to transcript.
+    AVM_TRACK_TIME("prove/public_inputs_round", execute_public_inputs_round());
 
     // Compute wire commitments.
     AVM_TRACK_TIME("prove/wire_commitments_round", execute_wire_commitments_round());

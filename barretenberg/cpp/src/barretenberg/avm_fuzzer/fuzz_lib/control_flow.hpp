@@ -64,10 +64,23 @@ struct FinalizeWithReturn {
     MSGPACK_FIELDS(return_options);
 };
 
+/// @brief finalizes the current block with Revert and switches to the first non-terminated block
+struct FinalizeWithRevert {
+    ReturnOptions revert_options;
+    MSGPACK_FIELDS(revert_options);
+};
+
 /// @brief switches to the non-terminated block with the chosen index
 struct SwitchToNonTerminatedBlock {
     uint16_t non_terminated_block_idx;
     MSGPACK_FIELDS(non_terminated_block_idx);
+};
+
+/// @brief inserts INTERNALCALL instruction to the current block
+/// creates a new block and sets it as the current block
+struct InsertInternalCall {
+    uint16_t target_program_block_instruction_block_idx;
+    MSGPACK_FIELDS(target_program_block_instruction_block_idx);
 };
 
 using CFGInstruction = std::variant<InsertSimpleInstructionBlock,
@@ -76,7 +89,9 @@ using CFGInstruction = std::variant<InsertSimpleInstructionBlock,
                                     JumpToBlock,
                                     JumpIfToBlock,
                                     FinalizeWithReturn,
-                                    SwitchToNonTerminatedBlock>;
+                                    FinalizeWithRevert,
+                                    SwitchToNonTerminatedBlock,
+                                    InsertInternalCall>;
 template <class... Ts> struct overloaded_cfg_instruction : Ts... {
     using Ts::operator()...;
 };
@@ -103,8 +118,15 @@ inline std::ostream& operator<<(std::ostream& os, const CFGInstruction& instruct
                 os << "FinalizeWithReturn " << arg.return_options.return_size << " "
                    << arg.return_options.return_value_tag << " " << arg.return_options.return_value_offset_index;
             },
+            [&](FinalizeWithRevert arg) {
+                os << "FinalizeWithRevert " << arg.revert_options.return_size << " "
+                   << arg.revert_options.return_value_tag << " " << arg.revert_options.return_value_offset_index;
+            },
             [&](SwitchToNonTerminatedBlock arg) {
                 os << "SwitchToNonTerminatedBlock " << arg.non_terminated_block_idx;
+            },
+            [&](InsertInternalCall arg) {
+                os << "InsertInternalCall " << arg.target_program_block_instruction_block_idx;
             },
         },
         instruction);
@@ -145,12 +167,22 @@ class ControlFlow {
     void process_jump_if_to_block(JumpIfToBlock instruction);
 
     /// @brief terminates the current block with Return and switches to the first non-terminated block
+    /// @note if the current block has caller, it inserts INTERNALRETURN only and switches to the caller
     /// @param instruction the instruction to process
     void process_finalize_with_return(FinalizeWithReturn instruction);
+
+    /// @brief terminates the current block with Revert and switches to the first non-terminated block
+    /// @param instruction the instruction to process
+    void process_finalize_with_revert(FinalizeWithRevert instruction);
 
     /// @brief switches to the non-terminated block with the chosen index
     /// @param instruction the instruction to process
     void process_switch_to_non_terminated_block(SwitchToNonTerminatedBlock instruction);
+
+    /// @brief inserts INTERNALCALL instruction to the current block
+    /// creates a new block and sets it as the current block
+    /// @param instruction the instruction to process
+    void process_insert_internal_call(InsertInternalCall instruction);
 
     /// @brief traverse the control flow graph using DFS
     /// @param start_block the start block
@@ -164,6 +196,7 @@ class ControlFlow {
 
     /// @brief get the list of blocks which are can be reached from the given block without creating a loop in the
     /// graph
+    /// Also filters out blocks with different caller
     std::vector<ProgramBlock*> get_reachable_blocks(ProgramBlock* block);
 
   public:

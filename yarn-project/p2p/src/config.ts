@@ -9,9 +9,9 @@ import {
   pickConfigMappings,
   secretStringConfigHelper,
 } from '@aztec/foundation/config';
-import { Fr } from '@aztec/foundation/fields';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { type DataStoreConfig, dataConfigMappings } from '@aztec/kv-store/config';
-import { FunctionSelector } from '@aztec/stdlib/abi';
+import { FunctionSelector } from '@aztec/stdlib/abi/function-selector';
 import { AztecAddress } from '@aztec/stdlib/aztec-address';
 import { type AllowedElement, type ChainConfig, chainConfigMappings } from '@aztec/stdlib/config';
 
@@ -133,11 +133,8 @@ export interface P2PConfig extends P2PReqRespConfig, ChainConfig, TxCollectionCo
   /** Which calls are allowed in the public setup phase of a tx. */
   txPublicSetupAllowList: AllowedElement[];
 
-  /** The maximum cumulative tx size (in bytes) of pending txs before evicting lower priority txs. */
-  maxTxPoolSize: number;
-
-  /** If the pool is full, it will still accept a few more txs until it reached maxTxPoolOverspillFactor * maxTxPoolSize. Then it will evict */
-  txPoolOverflowFactor: number;
+  /** The maximum number of pending txs before evicting lower priority txs. */
+  maxPendingTxCount: number;
 
   /** The node's seen message ID cache size */
   seenMessageCacheSize: number;
@@ -164,6 +161,9 @@ export interface P2PConfig extends P2PReqRespConfig, ChainConfig, TxCollectionCo
 
   /** Whether to delete transactions from the pool after a reorg instead of moving them back to pending. */
   txPoolDeleteTxsAfterReorg: boolean;
+
+  /** Alters the format of p2p messages to include things like broadcast timestamp FOR TESTING ONLY */
+  debugP2PInstrumentMessages: boolean;
 
   /** Whether to run in fisherman mode: validates all proposals and attestations but does not broadcast attestations or participate in consensus */
   fishermanMode: boolean;
@@ -372,15 +372,12 @@ export const p2pConfigMappings: ConfigMappingsType<P2PConfig> = {
     printDefault: () =>
       'AuthRegistry, FeeJuice.increase_public_balance, Token.increase_public_balance, FPC.prepare_fee',
   },
-  maxTxPoolSize: {
-    env: 'P2P_MAX_TX_POOL_SIZE',
-    description: 'The maximum cumulative tx size of pending txs (in bytes) before evicting lower priority txs.',
-    ...numberConfigHelper(100_000_000), // 100MB
-  },
-  txPoolOverflowFactor: {
-    env: 'P2P_TX_POOL_OVERFLOW_FACTOR',
-    description: 'How much the tx pool can overflow before it starts evicting txs. Must be greater than 1',
-    ...floatConfigHelper(1.1), // 10% overflow
+  maxPendingTxCount: {
+    env: 'P2P_MAX_PENDING_TX_COUNT',
+    description: 'The maximum number of pending txs before evicting lower priority txs.',
+    // Worst case scenario: Uncompressed public/private tx is ~ 156kb
+    // This implies we are using ~156MB of memory for pending pool
+    ...numberConfigHelper(1_000),
   },
   seenMessageCacheSize: {
     env: 'P2P_SEEN_MSG_CACHE_SIZE',
@@ -409,7 +406,7 @@ export const p2pConfigMappings: ConfigMappingsType<P2PConfig> = {
   },
   dropTransactionsProbability: {
     env: 'P2P_DROP_TX_CHANCE',
-    description: 'The probability that a transaction is discarded. - For testing purposes only',
+    description: 'The probability that a transaction is discarded (0 - 1). - For testing purposes only',
     ...floatConfigHelper(0),
   },
   disableTransactions: {
@@ -421,6 +418,11 @@ export const p2pConfigMappings: ConfigMappingsType<P2PConfig> = {
   txPoolDeleteTxsAfterReorg: {
     env: 'P2P_TX_POOL_DELETE_TXS_AFTER_REORG',
     description: 'Whether to delete transactions from the pool after a reorg instead of moving them back to pending.',
+    ...booleanConfigHelper(false),
+  },
+  debugP2PInstrumentMessages: {
+    env: 'DEBUG_P2P_INSTRUMENT_MESSAGES',
+    description: 'Alters the format of p2p messages to include things like broadcast timestamp FOR TESTING ONLY',
     ...booleanConfigHelper(false),
   },
   fishermanMode: {

@@ -106,30 +106,6 @@ enum class VKSerializationMode : std::uint8_t {
     NO_METADATA // Serialize only commitments, no metadata
 };
 
-// Specifies the regions of the execution trace containing non-trivial wire values
-struct ActiveRegionData {
-    void add_range(const size_t start, const size_t end)
-    {
-        BB_ASSERT_GTE(start, current_end, "Ranges should be non-overlapping and increasing.");
-        ranges.emplace_back(start, end);
-        for (size_t i = start; i < end; ++i) {
-            idxs.push_back(i);
-        }
-        current_end = end;
-    }
-
-    std::vector<std::pair<size_t, size_t>> get_ranges() const { return ranges; }
-    size_t get_idx(const size_t idx) const { return idxs[idx]; }
-    std::pair<size_t, size_t> get_range(const size_t idx) const { return ranges.at(idx); }
-    size_t size() const { return idxs.size(); }
-    size_t num_ranges() const { return ranges.size(); }
-
-  private:
-    std::vector<std::pair<size_t, size_t>> ranges; // active ranges [start_i, end_i) of the execution trace
-    std::vector<size_t> idxs;                      // full set of poly indices corresposponding to active ranges
-    size_t current_end{ 0 };                       // end of last range; for ensuring monotonicity of ranges
-};
-
 /**
  * @brief Dyadic trace size and public inputs metadata; Common between prover and verifier keys
  */
@@ -446,23 +422,59 @@ class StdlibVerificationKey_ : public PrecomputedCommitments {
     }
 };
 
+/**
+ * @brief Wrapper holding a verification key and its precomputed hash.
+ * @details The hash is used to bind the verification key to the proof during verification, ensuring that the
+ * correct VK is used.
+ *
+ * This class provides three constructors for different use cases:
+ *
+ * 1. **VKAndHash_(vk)** - Auto-computes hash from VK
+ *    - Use case: Native verification entry points (e.g., `bb verify`, ACIR proof verification)
+ *
+ * 2. **VKAndHash_(builder, native_vk)** - Creates stdlib VK from native and computes hash (recursive only)
+ *    - Use case: Setting up recursive verifiers with a native VK reference
+ *
+ * 3. **VKAndHash_(vk, hash)** - Takes both VK and hash separately
+ *    - Use case: Constraint-based recursion (ACIR) where hash is provided as a separate circuit witness
+ *
+ * @tparam FF The field type (native fr or stdlib field_t)
+ * @tparam VerificationKey The verification key type (native or stdlib)
+ */
 template <typename FF, typename VerificationKey> class VKAndHash_ {
   public:
-    using Builder = VerificationKey::Builder;
-    using NativeVerificationKey = VerificationKey::NativeVerificationKey;
+    template <typename T = VerificationKey>
+    using Builder = typename std::enable_if_t<requires { typename T::Builder; }, T>::Builder;
+
+    template <typename T = VerificationKey>
+    using NativeVerificationKey =
+        typename std::enable_if_t<requires { typename T::NativeVerificationKey; }, T>::NativeVerificationKey;
 
     VKAndHash_() = default;
+
+    /**
+     * @brief Construct from VK, auto-computing the hash.
+     */
     VKAndHash_(const std::shared_ptr<VerificationKey>& vk)
         : vk(vk)
         , hash(vk->hash())
     {}
 
+    /**
+     * @brief Construct from VK and pre-provided hash.
+     */
     VKAndHash_(const std::shared_ptr<VerificationKey>& vk, const FF& hash)
         : vk(vk)
         , hash(hash)
     {}
 
-    VKAndHash_(Builder& builder, const std::shared_ptr<NativeVerificationKey>& native_vk)
+    /**
+     * @brief Construct stdlib VKAndHash from a native VK (recursive verification keys only).
+     */
+    template <typename VK = VerificationKey,
+              typename B = typename VK::Builder,
+              typename NVK = typename VK::NativeVerificationKey>
+    VKAndHash_(B& builder, const std::shared_ptr<NVK>& native_vk)
         : vk(std::make_shared<VerificationKey>(&builder, native_vk))
         , hash(FF::from_witness(&builder, native_vk->hash()))
     {}
@@ -554,6 +566,7 @@ class UltraStarknetZKFlavor;
 class UltraKeccakZKFlavor;
 class MegaFlavor;
 class MegaZKFlavor;
+class MegaAvmFlavor;
 class TranslatorFlavor;
 class ECCVMRecursiveFlavor;
 class TranslatorRecursiveFlavor;
@@ -565,6 +578,7 @@ template <typename BuilderType> class UltraZKRecursiveFlavor_;
 template <typename BuilderType> class UltraRollupRecursiveFlavor_;
 template <typename BuilderType> class MegaRecursiveFlavor_;
 template <typename BuilderType> class MegaZKRecursiveFlavor_;
+template <typename BuilderType> class MegaAvmRecursiveFlavor_;
 
 // Serialization methods for NativeVerificationKey_.
 // These should cover all base classes that do not need additional members, as long as the appropriate SerializeMetadata

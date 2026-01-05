@@ -1,4 +1,5 @@
-import { Fr } from '@aztec/foundation/fields';
+import { SlotNumber } from '@aztec/foundation/branded-types';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { type ZodFor, schemas } from '@aztec/foundation/schemas';
 import { BufferReader, FieldReader, serializeToBuffer, serializeToFields } from '@aztec/foundation/serialize';
 import { bufferToHex, hexToBuffer } from '@aztec/foundation/string';
@@ -72,8 +73,8 @@ export class L2BlockHeader {
     return new L2BlockHeader(...L2BlockHeader.getFields(fields));
   }
 
-  getSlot() {
-    return this.globalVariables.slotNumber.toBigInt();
+  getSlot(): SlotNumber {
+    return this.globalVariables.slotNumber;
   }
 
   getBlockNumber() {

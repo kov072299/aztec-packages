@@ -1,3 +1,4 @@
+import type { SlotNumber } from '@aztec/foundation/branded-types';
 import type {
   AuthRequest,
   ENR,
@@ -78,7 +79,9 @@ export class DummyP2P implements P2P {
   }
 
   public getTxStatus(_txHash: TxHash): Promise<'pending' | 'mined' | undefined> {
-    throw new Error('DummyP2P does not implement "getTxStatus"');
+    // In TXE there is no concept of transactions but we need to implement this because of tagging. We return 'mined'
+    // tx status for any tx hash.
+    return Promise.resolve('mined');
   }
 
   public iteratePendingTxs(): AsyncIterableIterator<Tx> {
@@ -117,7 +120,7 @@ export class DummyP2P implements P2P {
     throw new Error('DummyP2P does not implement "getTxsByHash"');
   }
 
-  public getAttestationsForSlot(_slot: bigint, _proposalId?: string): Promise<BlockAttestation[]> {
+  public getAttestationsForSlot(_slot: SlotNumber, _proposalId?: string): Promise<BlockAttestation[]> {
     throw new Error('DummyP2P does not implement "getAttestationForSlot"');
   }
 

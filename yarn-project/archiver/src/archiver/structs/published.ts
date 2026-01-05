@@ -1,1 +1,1 @@
-export type { PublishedL2Block, L1PublishedData } from '@aztec/stdlib/block';
+export type { L1PublishedData, PublishedCheckpoint } from '@aztec/stdlib/checkpoint';

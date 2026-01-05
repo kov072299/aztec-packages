@@ -13,6 +13,32 @@ export DENOISE=${DENOISE:-1}
 # Number of TXE servers to run when testing.
 export NUM_TXES=8
 
+export MAKEFLAGS="-j${MAKE_JOBS:-$(get_num_cpus)}"
+
+# Cleanup function. Called on script exit.
+function cleanup {
+  set +e
+  if [ -n "${test_engine_pid:-}" ]; then
+    echo "Sending SIGTERM to test engine process group..."
+    kill -SIGTERM -- -$test_engine_pgid &>/dev/null
+    wait $test_engine_pid
+    test_engine_pid=
+  fi
+  if [ -n "${make_pid:-}" ]; then
+    echo "Sending SIGTERM to make process..."
+    kill -SIGTERM $make_pid &>/dev/null
+    wait $make_pid
+    make_pid=
+  fi
+  if [ -n "${txe_pids:-}" ]; then
+    echo "Sending SIGTERM to TXE processes..."
+    kill -SIGTERM $txe_pids &>/dev/null
+    wait $txe_pids
+    txe_pids=
+  fi
+}
+trap cleanup EXIT
+
 function encourage_dev_container {
   echo -e "${bold}${red}ERROR: Toolchain incompatibility. We encourage use of our dev container. See build-images/README.md.${reset}"
 }
@@ -169,15 +195,13 @@ function sort_by_cpus {
 function test_cmds {
   if [ "$#" -eq 0 ]; then
     # Ordered with longest running first, to ensure they get scheduled earliest.
-    set -- yarn-project/end-to-end aztec-up yarn-project noir-projects boxes playground barretenberg l1-contracts docs
+    set -- yarn-project/end-to-end aztec-up yarn-project noir-projects boxes playground barretenberg l1-contracts docs ci3
   fi
   parallel -k --line-buffer './{}/bootstrap.sh test_cmds' ::: $@ | filter_test_cmds | sort_by_cpus
 }
 
-function start_test_env {
+function start_txes {
   # Starting txe servers with incrementing port numbers.
-  trap 'kill -SIGTERM $txe_pids &>/dev/null || true' EXIT
-
   for i in $(seq 0 $((NUM_TXES-1))); do
     port=$((45730 + i))
     existing_pid=$(lsof -ti :$port || true)
@@ -201,10 +225,83 @@ function start_test_env {
   done
 }
 
+export test_cmds_file="/tmp/test_cmds"
+
+function test_engine_start {
+  # This trickery is to overcome an oddity in parallel.
+  # Turns out when we hold an open pipe to parallel, like we do using tail below,
+  # parallel will only process the result of job N when it receives a new job *after* job N has completed.
+  # This can prevent a "fail fast" situation, or prevent the results from the first batch of commands from showing up.
+  # Empty commands fed to run_test_cmd are no-ops, so we keep parallel processing results in timely fashion with this.
+  while ! grep -E '^STOP$' $test_cmds_file; do sleep 5; echo | atomic_append $test_cmds_file; done &
+  # Continuously stream the test cmds into parallelize.
+  DENOISE=0 parallelize < <(tail -n+0 -f $test_cmds_file)
+}
+export -f test_engine_start
+
+function prep {
+  pull_submodules
+  check_toolchains
+
+  # Ensure we have yarn set up.
+  corepack enable
+
+  rm -f $test_cmds_file
+}
+
+function build_and_test {
+  local target=${1:-}
+
+  prep
+  echo_header "build and test"
+
+  # Start the test engine.
+  rm -f $test_cmds_file
+  touch $test_cmds_file
+  # put it in it's own process group via background subshell, we can terminate on cleanup.
+  (color_prefix "test-engine" "denoise test_engine_start") &
+  test_engine_pid=$!
+  test_engine_pgid=$(ps -o pgid= -p $test_engine_pid)
+
+  # Start the build.
+  if [ -z "$target" ]; then
+    [ "$CI_FULL" -eq 0 ] && target="all" || target="full"
+  fi
+  make $target &
+  make_pid=$!
+
+  # As soon as one of the above fails, terminate the other (as part of exit cleanup).
+  while [ -n "$make_pid" ] || [ -n "$test_engine_pid" ]; do
+    # This will return success only if build or test succeeds.
+    # Otherwise it's an error, which is an exit, which means we enter cleanup.
+    wait -p finished -n $make_pid $test_engine_pid &>/dev/null
+
+    # If make succeeded, start txes and add tests that depend on them.
+    if [ "$finished" == "$make_pid" ]; then
+      make_pid=
+
+      if [ -z "${1:-}" ]; then
+        # TODO: Handle this better to they can be run as part of the Makefile dependency tree.
+        start_txes
+        make noir-projects-txe-tests
+      fi
+
+      # Signal tests complete, handled by parallel -E STOP.
+      echo STOP >> $test_cmds_file
+    fi
+
+    if [ "$finished" == "$test_engine_pid" ]; then
+      test_engine_pid=
+    fi
+  done
+
+  return 0
+}
+
 function test {
   echo_header "test all"
 
-  start_test_env
+  start_txes
 
   # We will start half as many jobs as we have cpu's.
   # This is based on the slightly magic assumption that many tests can benefit from 2 cpus,
@@ -231,11 +328,7 @@ function pull_submodules {
 }
 
 function build {
-  pull_submodules
-  check_toolchains
-
-  # Ensure we have yarn set up.
-  corepack enable
+  prep
 
   # These projects are dependent on each other and must be built linearly.
   serial_projects=(
@@ -285,7 +378,7 @@ function build {
 function bench_cmds {
   if [ "$#" -eq 0 ]; then
     # Ordered with longest running first, to ensure they get scheduled earliest.
-    set -- yarn-project/end-to-end yarn-project barretenberg/cpp barretenberg/sol noir-projects/noir-protocol-circuits l1-contracts
+    set -- yarn-project/end-to-end yarn-project barretenberg/{ts,cpp,sol} noir-projects/noir-protocol-circuits l1-contracts
   fi
   parallel -k --line-buffer './{}/bootstrap.sh bench_cmds' ::: $@ | sort_by_cpus
 }
@@ -395,6 +488,10 @@ function release_dryrun {
   DRY_RUN=1 release
 }
 
+# Handle our command line arguments.
+# All the commands that start with ci-* are intended to be callable from
+# a fresh repo. They are ideal for calling into from github actions on a new runner
+# Current flow: ci3.yml -> .github/ci3.sh -> ci.sh -> this script on a fresh EC2 runner.
 case "$cmd" in
   "clean")
     echo "WARNING: This will erase *all* untracked files, including hooks and submodules."
@@ -423,6 +520,9 @@ case "$cmd" in
     install_hooks
     build
   ;;
+  ######################################
+  # VARIANTS ON NORMAL PULL-REQUEST CI #
+  ######################################
   "ci-fast")
     export CI=1
     export USE_TEST_CACHE=1
@@ -446,16 +546,85 @@ case "$cmd" in
     test
     bench
     ;;
-  "ci-network-deploy")
+  "ci-full-no-test-cache-makefile")
     export CI=1
+    export USE_TEST_CACHE=0
+    export CI_FULL=1
+    build_and_test
+    bench
+    ;;
+  ##########################################
+  # NETWORK DEPLOYMENTS WITH BENCHES/TESTS #
+  ##########################################
+  "ci-network-deploy")
+    # Args: <env_file> <namespace> [docker_image]
+    export CI=1
+    env_file="${1:?env_file is required}"
+    namespace="${2:?namespace is required}"
+    docker_image="${3:-}"
     build
-    spartan/bootstrap.sh network_deploy $NETWORK_ENV_FILE
+    # If no docker image provided, build and push to aztecdev
+    if [ -z "$docker_image" ]; then
+      release-image/bootstrap.sh push_pr
+      docker_image="aztecprotocol/aztecdev:$(git rev-parse HEAD)"
+    fi
+    # Set up environment and deploy using spartan
+    export NAMESPACE="$namespace"
+    export AZTEC_DOCKER_IMAGE="$docker_image"
+    deploy_exit_code=0
+    spartan/bootstrap.sh network_deploy "${env_file}" || deploy_exit_code=$?
+    # Merge and upload deploy benchmarks (deploy_network.sh writes to spartan/bench-out/)
+    rm -rf bench-out
+    mkdir -p bench-out
+    bench_merge
+    cache_upload deploy-bench-$(git rev-parse HEAD^{tree}).tar.gz bench-out/bench.json
+    exit $deploy_exit_code
     ;;
   "ci-network-tests")
+    # Args: <env_file> <namespace>
     export CI=1
+    env_file="${1:?env_file is required}"
+    namespace="${2:?namespace is required}"
     build
-    spartan/bootstrap.sh network_tests $NETWORK_ENV_FILE
+    # Set up environment for tests
+    export NAMESPACE="$namespace"
+    spartan/bootstrap.sh network_tests "${env_file}"
     ;;
+  "ci-network-bench")
+    # Args: <env_file> <namespace> [docker_image]
+    # Deploys network and runs benchmarks. Cleanup should be done separately.
+    export CI=1
+    env_file="${1:?env_file is required}"
+    namespace="${2:?namespace is required}"
+    docker_image="${3:-}"
+    build
+    # If no docker image provided, build and push to aztecdev
+    if [ -z "$docker_image" ]; then
+      release-image/bootstrap.sh push_pr
+      docker_image="aztecprotocol/aztecdev:$(git rev-parse HEAD)"
+    fi
+    # Set up environment and deploy using spartan
+    export NAMESPACE="$namespace"
+    export AZTEC_DOCKER_IMAGE="$docker_image"
+    spartan/bootstrap.sh network_deploy "${env_file}"
+    # Run benchmarks
+    spartan/bootstrap.sh network_bench "${env_file}"
+    bench_merge
+    cache_upload spartan-bench-$(git rev-parse HEAD^{tree}).tar.gz bench-out/bench.json
+    ;;
+  "ci-network-teardown")
+    # Args: <env_file> <namespace>
+    # Tears down a deployed network.
+    export CI=1
+    env_file="${1:?env_file is required}"
+    namespace="${2:?namespace is required}"
+    # Set up environment for teardown
+    export NAMESPACE="$namespace"
+    denoise "spartan/bootstrap.sh network_teardown ${env_file}"
+    ;;
+  ############
+  # RELEASES #
+  ############
   "ci-release")
     export CI=1
     export USE_TEST_CACHE=1
@@ -465,6 +634,10 @@ case "$cmd" in
     build
     release
     ;;
+
+  ##########################
+  # MERGE TRAIN CI SUBSETS #
+  ##########################
   "ci-docs")
     export CI=1
     export USE_TEST_CACHE=1
@@ -478,6 +651,36 @@ case "$cmd" in
     export AVM_TRANSPILER=0
     barretenberg/cpp/bootstrap.sh ci
     ;;
+"ci-barretenberg-full")
+    export CI=1
+    export USE_TEST_CACHE=1
+    export AVM=0
+    export AVM_TRANSPILER=0
+    barretenberg/bootstrap.sh ci
+    ;;
+
+  #######################
+  # AVM QA ONE OFF JOBS #
+  #######################
+  "ci-avm-inputs-collection")
+    # Nightly job: Run e2e tests with AVM circuit inputs dumping, upload to cache
+    export CI=1
+    # Use tree hash for tarball name - consistent across all environments
+    export AVM_INPUTS_HASH=$(git rev-parse HEAD^{tree})
+    build
+    yarn-project/end-to-end/bootstrap.sh test_and_collect_avm_inputs
+    ;;
+  "ci-avm-check-circuit")
+    # Nightly job: Download cached AVM inputs and run check-circuit on each
+    export CI=1
+    # Use tree hash for tarball name - consistent across all environments
+    export AVM_INPUTS_HASH=$(git rev-parse HEAD^{tree})
+    build
+    yarn-project/end-to-end/bootstrap.sh avm_check_circuit
+    ;;
+  ##############################################
+  # Default handler, calls our above functions #
+  ##############################################
   *)
     default_cmd_handler "$@"
     ;;

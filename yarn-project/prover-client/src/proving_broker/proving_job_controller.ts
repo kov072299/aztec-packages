@@ -1,4 +1,5 @@
-import { randomBytes } from '@aztec/foundation/crypto';
+import { EpochNumber } from '@aztec/foundation/branded-types';
+import { randomBytes } from '@aztec/foundation/crypto/random';
 import { AbortError } from '@aztec/foundation/error';
 import { createLogger } from '@aztec/foundation/log';
 import type {
@@ -24,7 +25,7 @@ export class ProvingJobController {
   constructor(
     private jobId: ProvingJobId,
     private inputs: ProvingJobInputs,
-    private epochNumber: number,
+    private epochNumber: EpochNumber,
     private startedAt: number,
     private circuitProver: ServerCircuitProver,
     private onComplete: () => void,
@@ -124,8 +125,7 @@ export class ProvingJobController {
     const signal = this.abortController.signal;
     switch (type) {
       case ProvingRequestType.PUBLIC_VM: {
-        // TODO(#14234)[Unconditional PIs validation]: Remove argument "undefined".
-        return await this.circuitProver.getAvmProof(inputs, undefined, signal, this.epochNumber);
+        return await this.circuitProver.getAvmProof(inputs, signal, this.epochNumber);
       }
 
       case ProvingRequestType.PUBLIC_CHONK_VERIFIER: {

@@ -6,7 +6,7 @@ import {
   VK_TREE_HEIGHT,
 } from '@aztec/constants';
 import { padArrayEnd } from '@aztec/foundation/collection';
-import { Fr } from '@aztec/foundation/fields';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { createLogger } from '@aztec/foundation/log';
 import { MembershipWitness } from '@aztec/foundation/trees';
 import { FunctionSelector, NoteSelector } from '@aztec/stdlib/abi';
@@ -50,7 +50,14 @@ describe('Private Kernel Sequencer', () => {
 
   const notesAndSlots: NoteAndSlot[] = Array(10)
     .fill(null)
-    .map(() => new NoteAndSlot(new Note([Fr.random(), Fr.random(), Fr.random()]), Fr.random(), NoteSelector.random()));
+    .map(() =>
+      NoteAndSlot.from({
+        note: new Note([Fr.random(), Fr.random(), Fr.random()]),
+        storageSlot: Fr.random(),
+        randomness: Fr.random(),
+        noteTypeId: NoteSelector.random(),
+      }),
+    );
 
   const createFakeSiloedCommitment = (commitment: Fr) => new Fr(commitment.value + 1n);
   const generateFakeCommitment = (noteAndSlot: NoteAndSlot) => noteAndSlot.note.items[0];

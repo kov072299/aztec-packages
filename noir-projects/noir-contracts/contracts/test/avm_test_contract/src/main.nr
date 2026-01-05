@@ -39,7 +39,7 @@ pub contract AvmTest {
     };
     use dep::aztec::state_vars::Map;
     use dep::aztec::state_vars::PublicMutable;
-    use dep::aztec::state_vars::storage::HasStorageSlot;
+    use dep::aztec::state_vars::state_variable::StateVariable;
     use dep::compressed_string::CompressedString;
     use aztec::protocol_types::traits::Serialize;
     use std::embedded_curve_ops::{EmbeddedCurvePoint, multi_scalar_mul};
@@ -352,7 +352,7 @@ pub contract AvmTest {
             l2_gas_left - 200_000,
             da_gas_left - 200_000,
             self.address,
-            &[selector.to_field(), 0],
+            [selector.to_field(), 0],
         );
 
         // Use SUCCESSCOPY to get the success status
@@ -764,7 +764,7 @@ pub contract AvmTest {
     #[external("public")]
     fn nested_call_to_nothing_recovers() {
         let garbageAddress = AztecAddress::from_field(42);
-        call(1, 1, garbageAddress, &[]);
+        call(1, 1, garbageAddress, []);
         let success = success_copy();
         assert(
             !success,
@@ -829,12 +829,8 @@ pub contract AvmTest {
     ) -> Field {
         let selector =
             comptime { FunctionSelector::from_signature("add_args_return(Field,Field)") };
-        context.static_call_public_function(
-            address,
-            selector,
-            [arg_a, arg_b].as_slice(),
-            GasOpts::default(),
-        )[0]
+        context.static_call_public_function(address, selector, [arg_a, arg_b], GasOpts::default())
+            [0]
     }
 
     // Indirectly call_static `set_storage_single`. Should revert since it's accessing self.storage.
@@ -845,7 +841,7 @@ pub contract AvmTest {
         let _ = self.context.static_call_public_function(
             self.address,
             selector,
-            args.as_slice(),
+            args,
             GasOpts::default(),
         );
     }
@@ -945,7 +941,7 @@ pub contract AvmTest {
         dep::aztec::oracle::debug_log::debug_log("keccak_hash");
         let _ = keccak256::keccak256(args_u8, args_u8.len());
         dep::aztec::oracle::debug_log::debug_log("sha256_hash");
-        let _ = sha256::sha256_var(args_u8, args_u8.len() as u64);
+        let _ = sha256::sha256_var(args_u8, args_u8.len());
         dep::aztec::oracle::debug_log::debug_log("poseidon2_hash");
         let _ = poseidon::poseidon2::Poseidon2::hash(args_field, args_field.len());
         dep::aztec::oracle::debug_log::debug_log("pedersen_hash");

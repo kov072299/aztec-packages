@@ -1,8 +1,10 @@
 import { BBBundlePrivateKernelProver } from '@aztec/bb-prover/client/bundle';
+import { GENESIS_BLOCK_HEADER_HASH } from '@aztec/constants';
 import type { L1ContractAddresses } from '@aztec/ethereum/l1-contract-addresses';
+import { BlockNumber } from '@aztec/foundation/branded-types';
 import { omit } from '@aztec/foundation/collection';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { EthAddress } from '@aztec/foundation/eth-address';
-import { Fr } from '@aztec/foundation/fields';
 import { AztecLMDBStoreV2, openTmpStore } from '@aztec/kv-store/lmdb-v2';
 import { TestContractArtifact } from '@aztec/noir-test-contracts.js/Test';
 import { BundledProtocolContractsProvider } from '@aztec/protocol-contracts/providers/bundle';
@@ -12,6 +14,7 @@ import { AztecAddress } from '@aztec/stdlib/aztec-address';
 import { L2BlockHash } from '@aztec/stdlib/block';
 import { getContractClassFromArtifact } from '@aztec/stdlib/contract';
 import type { AztecNode } from '@aztec/stdlib/interfaces/client';
+import { SiloedTag } from '@aztec/stdlib/logs';
 import {
   randomContractArtifact,
   randomContractInstanceWithAddress,
@@ -23,8 +26,8 @@ import { mock } from 'jest-mock-extended';
 import type { MockProxy } from 'jest-mock-extended/lib/Mock.js';
 
 import type { PXEConfig } from './config/index.js';
-import { PXE, type PrivateEvent } from './pxe.js';
-import { PrivateEventDataProvider } from './storage/index.js';
+import { PXE, type PackedPrivateEvent } from './pxe.js';
+import { PrivateEventStore } from './storage/private_event_store/private_event_store.js';
 
 describe('PXE', () => {
   let pxe: PXE;
@@ -152,32 +155,41 @@ describe('PXE', () => {
   // These tests are meant to quickly exercise PXE as a
   // frontier API so we don't need to rely on slower E2E
   // tests (which in turn are more meaningful for acceptance).
-  // For finer grained tests check out storage/private_event_data_provider.test.ts
+  // For finer grained tests check out storage/private_event_store.test.ts
   describe('getPrivateEvents', () => {
     let contractAddress: AztecAddress;
     let eventSelector: EventSelector;
-    let blockNumber: number;
-    let blockHash: L2BlockHash;
-    let recipient: AztecAddress;
-    let privateEventDataProvider: PrivateEventDataProvider;
+    let lastKnownBlockNumber: BlockNumber;
+    let l2BlockHash: L2BlockHash;
+    let scope: AztecAddress;
+    let privateEventStore: PrivateEventStore;
+    let eventIndex = 0;
 
     beforeEach(async () => {
       // Set up basic state
-      blockNumber = 42;
+      lastKnownBlockNumber = BlockNumber(42);
       const globalVariables = GlobalVariables.empty({
-        blockNumber,
+        blockNumber: lastKnownBlockNumber,
       });
       const blockHeader = BlockHeader.empty({
         globalVariables,
       });
       node.getBlockHeader.mockResolvedValue(blockHeader);
 
+      // Mock getL2Tips which is needed for syncing tagged logs
+      node.getL2Tips.mockResolvedValue({
+        latest: { number: lastKnownBlockNumber, hash: GENESIS_BLOCK_HEADER_HASH.toString() },
+        proven: { number: lastKnownBlockNumber, hash: GENESIS_BLOCK_HEADER_HASH.toString() },
+        finalized: { number: lastKnownBlockNumber, hash: GENESIS_BLOCK_HEADER_HASH.toString() },
+      });
+
       // This is read when PXE tries to resolve the
       // class id of a contract instance
       node.getPublicStorageAt.mockResolvedValue(Fr.ZERO);
 
-      // Used to sync private logs from the node.
-      node.getLogsByTags.mockResolvedValue([]);
+      // Used to sync private logs from the node - the return array needs to have the same length as the number of tags
+      // on the input.
+      node.getPrivateLogsByTags.mockImplementation((tags: SiloedTag[]) => Promise.resolve(tags.map(() => [])));
 
       // Necessary to sync contract private state
       await pxe.registerContractClass(TestContractArtifact);
@@ -190,63 +202,101 @@ describe('PXE', () => {
 
       contractAddress = contractInstance.address;
       eventSelector = EventSelector.random();
-      blockHash = L2BlockHash.random();
+      l2BlockHash = L2BlockHash.random();
 
-      recipient = await AztecAddress.random();
+      scope = await AztecAddress.random();
 
-      privateEventDataProvider = new PrivateEventDataProvider(kvStore);
+      privateEventStore = new PrivateEventStore(kvStore);
     });
 
-    async function storeEvent(index: number): Promise<PrivateEvent> {
+    async function storeEvent(blockNumber?: number): Promise<PackedPrivateEvent> {
       const event = {
         packedEvent: [Fr.random(), Fr.random()],
-        blockNumber,
-        blockHash,
+        l2BlockNumber: BlockNumber(blockNumber ?? lastKnownBlockNumber),
+        l2BlockHash,
         txHash: TxHash.random(),
-        recipient,
         eventSelector,
       };
 
-      await privateEventDataProvider.storePrivateEventLog(
+      await privateEventStore.storePrivateEventLog(eventSelector, event.packedEvent, eventIndex++, {
         contractAddress,
-        recipient,
-        eventSelector,
-        event.packedEvent,
-        event.txHash,
-        index,
-        blockNumber,
-        blockHash,
-      );
+        scope,
+        txHash: event.txHash,
+        l2BlockNumber: event.l2BlockNumber,
+        l2BlockHash: event.l2BlockHash,
+      });
 
       return event;
     }
 
     it('returns private events', async () => {
       // Store a couple of events to exercise `getPrivateEvents`
-      const event1 = await storeEvent(0);
-      const event2 = await storeEvent(1);
+      const event1 = await storeEvent();
+      const event2 = await storeEvent();
 
-      const events = await pxe.getPrivateEvents(contractAddress, eventSelector, blockNumber, 1, [recipient]);
+      const events = await pxe.getPrivateEvents(eventSelector, {
+        contractAddress,
+        fromBlock: lastKnownBlockNumber,
+        scopes: [scope],
+      });
 
       expect(events).toEqual([event1, event2]);
     });
 
     it('returns no events', async () => {
-      const events = await pxe.getPrivateEvents(contractAddress, eventSelector, blockNumber, 1, [recipient]);
+      const events = await pxe.getPrivateEvents(eventSelector, {
+        contractAddress,
+        fromBlock: lastKnownBlockNumber,
+        scopes: [scope],
+      });
 
       expect(events).toEqual([]);
     });
 
-    it('rejects empty recipient lists', async () => {
-      await storeEvent(0);
-      await storeEvent(1);
+    describe('filtering', () => {
+      let eventsInPastBlocks: PackedPrivateEvent[];
+      let eventsInLatestKnownBlock: PackedPrivateEvent[];
+      let _eventsInNotYetSyncedBlocks: PackedPrivateEvent[];
 
-      await expect(pxe.getPrivateEvents(contractAddress, eventSelector, blockNumber, 1, [])).rejects.toThrow(
-        /Recipients are required/,
-      );
+      beforeEach(async () => {
+        eventsInPastBlocks = await Promise.all([
+          storeEvent(lastKnownBlockNumber - 1),
+          storeEvent(lastKnownBlockNumber - 1),
+        ]);
+
+        eventsInLatestKnownBlock = await Promise.all([
+          storeEvent(lastKnownBlockNumber),
+          storeEvent(lastKnownBlockNumber),
+        ]);
+
+        _eventsInNotYetSyncedBlocks = await Promise.all([
+          storeEvent(lastKnownBlockNumber + 1),
+          storeEvent(lastKnownBlockNumber + 1),
+        ]);
+      });
+
+      it('filters by txHash', async () => {
+        const events = await pxe.getPrivateEvents(eventSelector, {
+          contractAddress,
+          scopes: [scope],
+          txHash: eventsInLatestKnownBlock[1].txHash,
+        });
+
+        expect(events).toEqual([eventsInLatestKnownBlock[1]]);
+      });
+
+      it('filters by block', async () => {
+        const events = await pxe.getPrivateEvents(eventSelector, {
+          contractAddress,
+          scopes: [scope],
+          fromBlock: BlockNumber(lastKnownBlockNumber - 1),
+          toBlock: lastKnownBlockNumber,
+        });
+
+        expect(events).toEqual([...eventsInPastBlocks]);
+      });
     });
   });
-
   // Note: Not testing a successful run of `proveTx`, `sendTx`, `getTxReceipt` and `simulateUtility` here as it
   //       requires a larger setup and it's sufficiently tested in the e2e tests.
 });

@@ -57,14 +57,15 @@
     { "path": "prover-node/tsconfig.json" },
     { "path": "sequencer-client/tsconfig.json" },
     { "path": "world-state/tsconfig.json" },
-    { "path": "blob-sink/tsconfig.json" },
+    { "path": "blob-client/tsconfig.json" },
     { "path": "slasher/tsconfig.json" },
     { "path": "node-lib/tsconfig.json" },
     { "path": "txe/tsconfig.json" },
     { "path": "scripts/tsconfig.json" },
     { "path": "entrypoints/tsconfig.json" },
     { "path": "cli/tsconfig.json" },
-    { "path": "cli-wallet/tsconfig.json" }
+    { "path": "cli-wallet/tsconfig.json" },
+    { "path": "wallet-sdk/tsconfig.json" }
   ],
   "files": ["./@types/jest/index.d.ts"],
   "exclude": ["node_modules", "**/node_modules", "**/.*/"]

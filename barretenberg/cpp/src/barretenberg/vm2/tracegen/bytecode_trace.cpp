@@ -161,7 +161,7 @@ void BytecodeTraceBuilder::process_hashing(
     for (const auto& event : events) {
         const auto id = event.bytecode_id;
         // Note that bytecode fields from the BytecodeHashingEvent do not contain the prepended separator
-        std::vector<FF> fields = { GENERATOR_INDEX__PUBLIC_BYTECODE };
+        std::vector<FF> fields = { DOM_SEP__PUBLIC_BYTECODE };
         fields.insert(fields.end(), event.bytecode_fields.begin(), event.bytecode_fields.end());
         auto bytecode_field_at = [&fields](size_t i) -> FF { return i < fields.size() ? fields[i] : 0; };
         FF output_hash = Poseidon2::hash(fields);
@@ -270,10 +270,10 @@ void BytecodeTraceBuilder::process_instruction_fetching(
 {
     using C = Column;
     using simulation::InstructionFetchingEvent;
-    using simulation::InstrDeserializationError::INSTRUCTION_OUT_OF_RANGE;
-    using simulation::InstrDeserializationError::OPCODE_OUT_OF_RANGE;
-    using simulation::InstrDeserializationError::PC_OUT_OF_RANGE;
-    using simulation::InstrDeserializationError::TAG_OUT_OF_RANGE;
+    using simulation::InstrDeserializationEventError::INSTRUCTION_OUT_OF_RANGE;
+    using simulation::InstrDeserializationEventError::OPCODE_OUT_OF_RANGE;
+    using simulation::InstrDeserializationEventError::PC_OUT_OF_RANGE;
+    using simulation::InstrDeserializationEventError::TAG_OUT_OF_RANGE;
 
     // We start from row 1 because we need a row of zeroes for the shifts.
     uint32_t row = 1;

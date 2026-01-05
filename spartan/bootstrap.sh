@@ -78,6 +78,15 @@ function network_test_cmds {
   echo $prefix $run_test_script simple src/spartan/smoke.test.ts
   echo $prefix $run_test_script simple src/spartan/transfer.test.ts
   echo $prefix $run_test_script simple src/spartan/slash_inactivity.test.ts
+  echo $prefix $run_test_script simple src/spartan/proving.test.ts
+  echo $prefix $run_test_script simple src/spartan/prover-node.test.ts #needs partial epoch proved first
+  echo $prefix $run_test_script simple src/spartan/invalidate_blocks.test.ts
+  # echo $prefix $run_test_script simple src/spartan/4epochs.test.ts #takes too long ~4 epochs
+  echo $prefix $run_test_script simple src/spartan/gating-passive.test.ts
+  echo $prefix $run_test_script simple src/spartan/mempool_limit.test.ts
+  echo $prefix $run_test_script simple src/spartan/upgrade_governance_proposer.test.ts
+  # echo $prefix $run_test_script simple src/spartan/reorg.test.ts #takes too long >~5 epochs
+  echo $prefix $run_test_script simple src/spartan/validator_nuke_and_suppression.test.ts
 }
 
 function single_test {
@@ -98,10 +107,29 @@ function network_tests {
 
   # no parallelize here as we want to run the tests sequentially
   export SCENARIO_TESTS=1
+  # run all scenario tests even if one fails
+  : "${NO_FAIL_FAST:=1}"
+  export NO_FAIL_FAST
   source_network_env $env_file
 
   gcp_auth
   network_test_cmds | filter_test_cmds | parallelize 1
+}
+
+function network_bench_cmds {
+  echo "$hash:TIMEOUT=3600 BENCH_OUTPUT=bench-out/n_tps.bench.json TPS_TARGET=0.5,1,2 TEST_DURATION=600 $root/yarn-project/end-to-end/scripts/run_test.sh simple n_tps.test.ts"
+}
+
+function network_bench {
+  rm -rf bench-out
+  mkdir -p bench-out
+
+  local env_file="$1"
+  source_network_env $env_file
+
+  echo_header "spartan bench"
+  gcp_auth
+  network_bench_cmds | parallelize 1
 }
 
 function ensure_eth_balances {
@@ -151,11 +179,11 @@ case "$cmd" in
     source_env_basic "$env_file"
 
     # Run the network deploy script
-    ./scripts/network_deploy.sh "$env_file"
+    DENOISE=1 denoise "./scripts/network_deploy.sh $env_file"
 
     if [[ "${RUN_TESTS:-}" == "true" ]]; then
       echo "Running tests"
-      network_tests "$env_file"
+      denoise "./bootstrap.sh network_tests $env_file"
     fi
     ;;
   "single_test")
@@ -167,9 +195,9 @@ case "$cmd" in
     single_test $test_file
     ;;
 
-  "network_tests")
+  network_tests|network_bench)
     env_file="$1"
-    network_tests $env_file
+    $cmd $env_file
     ;;
   "kind")
     if ! kubectl config get-clusters | grep -q "^kind-kind$" || ! docker ps | grep -q "kind-control-plane"; then
@@ -187,7 +215,7 @@ case "$cmd" in
     docker update --restart=no kind-control-plane >/dev/null || true
     ;;
   "chaos-mesh")
-    chaos-mesh/install.sh
+    scripts/deploy_chaos_mesh.sh
     ;;
   "metrics-kind")
     metrics/install-kind.sh
@@ -235,32 +263,32 @@ case "$cmd" in
     ;;
   "test-kind-transfer")
     # TODO(#12163) reenable bot once not conflicting with transfer
-    OVERRIDES="blobSink.enabled=true,bot.enabled=false" \
+    OVERRIDES="bot.enabled=false" \
     FRESH_INSTALL=${FRESH_INSTALL:-true} INSTALL_METRICS=false \
       ./scripts/test_k8s.sh kind src/spartan/transfer.test.ts ci.yaml transfer${NAME_POSTFIX:-}
     ;;
   "test-kind-1tps")
-    OVERRIDES="blobSink.enabled=true,bot.enabled=false" \
+    OVERRIDES="bot.enabled=false" \
     FRESH_INSTALL=${FRESH_INSTALL:-true} INSTALL_METRICS=false RESOURCES_FILE=gcloud-1tps-sim.yaml \
       ./scripts/test_k8s.sh kind src/spartan/1tps.test.ts ci-1tps.yaml one-tps${NAME_POSTFIX:-}
     ;;
   "test-kind-10tps-10%-drop")
-    OVERRIDES="telemetry.enabled=false,blobSink.enabled=true,bot.enabled=false,validator.p2p.dropTransactions=true,validator.p2p.dropTransactionsProbability=0.1" \
+    OVERRIDES="telemetry.enabled=false,bot.enabled=false,validator.p2p.dropTransactions=true,validator.p2p.dropTransactionsProbability=0.1" \
     FRESH_INSTALL=${FRESH_INSTALL:-true} INSTALL_METRICS=false \
     ./scripts/test_k8s.sh kind src/spartan/n_tps.test.ts ci-1tps.yaml ten-tps${NAME_POSTFIX:-}
   ;;
   "test-kind-10tps-30%-drop")
-    OVERRIDES="telemetry.enabled=false,blobSink.enabled=true,bot.enabled=false,validator.p2p.dropTransactions=true,validator.p2p.dropTransactionsProbability=0.3" \
+    OVERRIDES="telemetry.enabled=false,bot.enabled=false,validator.p2p.dropTransactions=true,validator.p2p.dropTransactionsProbability=0.3" \
     FRESH_INSTALL=${FRESH_INSTALL:-true} INSTALL_METRICS=false \
     ./scripts/test_k8s.sh kind src/spartan/n_tps.test.ts ci-tx-drop.yaml ten-tps${NAME_POSTFIX:-}
   ;;
   "test-kind-10tps-50%-drop")
-    OVERRIDES="telemetry.enabled=false,blobSink.enabled=true,bot.enabled=false,validator.p2p.dropTransactions=true,validator.p2p.dropTransactionsProbability=0.5" \
+    OVERRIDES="telemetry.enabled=false,bot.enabled=false,validator.p2p.dropTransactions=true,validator.p2p.dropTransactionsProbability=0.5" \
     FRESH_INSTALL=${FRESH_INSTALL:-true} INSTALL_METRICS=false \
     ./scripts/test_k8s.sh kind src/spartan/n_tps.test.ts ci-tx-drop.yaml ten-tps${NAME_POSTFIX:-}
   ;;
   "test-kind-upgrade-rollup-version")
-    OVERRIDES="bot.enabled=false,ethereum.acceleratedTestDeployments=false" \
+    OVERRIDES="bot.enabled=false" \
     FRESH_INSTALL=${FRESH_INSTALL:-true} INSTALL_METRICS=false \
       ./scripts/test_k8s.sh kind src/spartan/upgrade_rollup_version.test.ts ci.yaml upgrade-rollup-version${NAME_POSTFIX:-}
     ;;
@@ -275,7 +303,7 @@ case "$cmd" in
   "test-gke-transfer")
     execution_client="$1"
     # TODO(#12163) reenable bot once not conflicting with transfer
-    OVERRIDES="blobSink.enabled=true,bot.enabled=false"
+    OVERRIDES="bot.enabled=false"
     if [ -n "$execution_client" ]; then
       OVERRIDES="$OVERRIDES,ethereum.execution.client=$execution_client"
     fi
@@ -283,7 +311,7 @@ case "$cmd" in
       ./scripts/test_k8s.sh gke src/spartan/transfer.test.ts ci-fast-epoch.yaml ${NAMESPACE:-"transfer${NAME_POSTFIX:-}"}
     ;;
   "test-gke-1tps")
-    OVERRIDES="blobSink.enabled=true,bot.enabled=false" \
+    OVERRIDES="bot.enabled=false" \
     FRESH_INSTALL=${FRESH_INSTALL:-true} INSTALL_METRICS=false RESOURCES_FILE=gcloud-1tps-sim.yaml \
       ./scripts/test_k8s.sh gke src/spartan/1tps.test.ts ci-1tps.yaml ${NAMESPACE:-"one-tps${NAME_POSTFIX:-}"}
     ;;
@@ -294,7 +322,7 @@ case "$cmd" in
       ./scripts/test_k8s.sh gke src/spartan/4epochs.test.ts ci-1tps.yaml ${NAMESPACE:-"four-epochs${NAME_POSTFIX:-}"}
     ;;
   "test-gke-upgrade-rollup-version")
-    OVERRIDES="bot.enabled=false,ethereum.acceleratedTestDeployments=false" \
+    OVERRIDES="bot.enabled=false" \
     FRESH_INSTALL=${FRESH_INSTALL:-true} INSTALL_METRICS=false \
       ./scripts/test_k8s.sh gke src/spartan/upgrade_rollup_version.test.ts ci.yaml ${NAMESPACE:-"upgrade-rollup-version${NAME_POSTFIX:-}"}
     ;;
@@ -302,6 +330,13 @@ case "$cmd" in
     OVERRIDES="telemetry.enabled=false" \
     FRESH_INSTALL=${FRESH_INSTALL:-true} INSTALL_METRICS=false \
       ./scripts/test_k8s.sh gke src/spartan/upgrade_via_cli.test.ts 1-validators.yaml ${NAMESPACE:-"upgrade-via-cli${NAME_POSTFIX:-}"}
+    ;;
+  "network_teardown")
+    env_file="$1"
+    # Sets up basic env vars like CLUSTER for gcp auth
+    source_env_basic "$env_file"
+    gcp_auth
+    ./scripts/network_teardown.sh
     ;;
   *)
     echo "Unknown command: $cmd"

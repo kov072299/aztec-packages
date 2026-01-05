@@ -1,7 +1,8 @@
-import type { ViemHeader } from '@aztec/ethereum';
-import { sha256ToField } from '@aztec/foundation/crypto';
+import type { ViemHeader } from '@aztec/ethereum/contracts';
+import { SlotNumber } from '@aztec/foundation/branded-types';
+import { sha256ToField } from '@aztec/foundation/crypto/sha256';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { EthAddress } from '@aztec/foundation/eth-address';
-import { Fr } from '@aztec/foundation/fields';
 import type { ZodFor } from '@aztec/foundation/schemas';
 import { BufferReader, bigintToUInt64BE, serializeToBuffer } from '@aztec/foundation/serialize';
 import { bufferToHex, hexToBuffer } from '@aztec/foundation/string';
@@ -16,6 +17,10 @@ import { schemas } from '../schemas/index.js';
 import { ContentCommitment } from '../tx/content_commitment.js';
 import type { UInt64 } from '../types/shared.js';
 
+/**
+ * Header of a checkpoint. A checkpoint is a collection of blocks submitted to L1 all within the same slot.
+ * TODO(palla/mbps): Should this include chainId and version as well? Is this used just in circuits?
+ */
 export class CheckpointHeader {
   constructor(
     /** Root of the archive tree before this block is added. */
@@ -25,7 +30,7 @@ export class CheckpointHeader {
     /** Content commitment of the L2 block. */
     public contentCommitment: ContentCommitment,
     /** Slot number of the L2 block */
-    public slotNumber: Fr,
+    public slotNumber: SlotNumber,
     /** Timestamp of the L2 block. */
     public timestamp: UInt64,
     /** Recipient of block reward. */
@@ -44,7 +49,7 @@ export class CheckpointHeader {
         lastArchiveRoot: schemas.Fr,
         blockHeadersHash: schemas.Fr,
         contentCommitment: ContentCommitment.schema,
-        slotNumber: schemas.Fr,
+        slotNumber: schemas.SlotNumber,
         timestamp: schemas.BigInt,
         coinbase: schemas.EthAddress,
         feeRecipient: schemas.AztecAddress,
@@ -79,7 +84,7 @@ export class CheckpointHeader {
       reader.readObject(Fr),
       reader.readObject(Fr),
       reader.readObject(ContentCommitment),
-      Fr.fromBuffer(reader),
+      SlotNumber(Fr.fromBuffer(reader).toNumber()),
       reader.readUInt64(),
       reader.readObject(EthAddress),
       reader.readObject(AztecAddress),
@@ -93,7 +98,7 @@ export class CheckpointHeader {
       this.lastArchiveRoot.equals(other.lastArchiveRoot) &&
       this.blockHeadersHash.equals(other.blockHeadersHash) &&
       this.contentCommitment.equals(other.contentCommitment) &&
-      this.slotNumber.equals(other.slotNumber) &&
+      this.slotNumber === other.slotNumber &&
       this.timestamp === other.timestamp &&
       this.coinbase.equals(other.coinbase) &&
       this.feeRecipient.equals(other.feeRecipient) &&
@@ -108,7 +113,7 @@ export class CheckpointHeader {
       this.lastArchiveRoot,
       this.blockHeadersHash,
       this.contentCommitment,
-      this.slotNumber,
+      new Fr(this.slotNumber),
       bigintToUInt64BE(this.timestamp),
       this.coinbase,
       this.feeRecipient,
@@ -126,7 +131,7 @@ export class CheckpointHeader {
       lastArchiveRoot: Fr.ZERO,
       blockHeadersHash: Fr.ZERO,
       contentCommitment: ContentCommitment.empty(),
-      slotNumber: Fr.ZERO,
+      slotNumber: SlotNumber.ZERO,
       timestamp: 0n,
       coinbase: EthAddress.ZERO,
       feeRecipient: AztecAddress.ZERO,
@@ -136,18 +141,21 @@ export class CheckpointHeader {
     });
   }
 
-  static random(): CheckpointHeader {
-    return new CheckpointHeader(
-      Fr.random(),
-      Fr.random(),
-      ContentCommitment.random(),
-      new Fr(BigInt(Math.floor(Math.random() * 1000) + 1)),
-      BigInt(Math.floor(Date.now() / 1000)),
-      EthAddress.random(),
-      new AztecAddress(Fr.random()),
-      GasFees.random(),
-      new Fr(BigInt(Math.floor(Math.random() * 1000000))),
-    );
+  static random(
+    overrides: Partial<FieldsOf<CheckpointHeader>> & Partial<FieldsOf<ContentCommitment>> = {},
+  ): CheckpointHeader {
+    return CheckpointHeader.from({
+      lastArchiveRoot: Fr.random(),
+      blockHeadersHash: Fr.random(),
+      contentCommitment: ContentCommitment.random(overrides),
+      slotNumber: SlotNumber(Math.floor(Math.random() * 1000) + 1),
+      timestamp: BigInt(Math.floor(Date.now() / 1000)),
+      coinbase: EthAddress.random(),
+      feeRecipient: new AztecAddress(Fr.random()),
+      gasFees: GasFees.random(),
+      totalManaUsed: new Fr(BigInt(Math.floor(Math.random() * 1000000))),
+      ...overrides,
+    });
   }
 
   isEmpty(): boolean {
@@ -155,7 +163,7 @@ export class CheckpointHeader {
       this.lastArchiveRoot.isZero() &&
       this.blockHeadersHash.isZero() &&
       this.contentCommitment.isEmpty() &&
-      this.slotNumber.isZero() &&
+      this.slotNumber === 0 &&
       this.timestamp === 0n &&
       this.coinbase.isZero() &&
       this.feeRecipient.isZero() &&
@@ -181,7 +189,7 @@ export class CheckpointHeader {
       Fr.fromString(header.lastArchiveRoot),
       Fr.fromString(header.blockHeadersHash),
       ContentCommitment.fromViem(header.contentCommitment),
-      new Fr(header.slotNumber),
+      SlotNumber.fromBigInt(header.slotNumber),
       header.timestamp,
       new EthAddress(hexToBuffer(header.coinbase)),
       new AztecAddress(hexToBuffer(header.feeRecipient)),
@@ -190,12 +198,20 @@ export class CheckpointHeader {
     );
   }
 
+  /**
+   * Returns the slot number as a SlotNumber branded type.
+   * @deprecated Use slotNumber directly instead.
+   */
+  getSlotNumber(): SlotNumber {
+    return this.slotNumber;
+  }
+
   toViem(): ViemHeader {
     return {
       lastArchiveRoot: this.lastArchiveRoot.toString(),
       blockHeadersHash: this.blockHeadersHash.toString(),
       contentCommitment: this.contentCommitment.toViem(),
-      slotNumber: this.slotNumber.toBigInt(),
+      slotNumber: BigInt(this.slotNumber),
       timestamp: this.timestamp,
       coinbase: this.coinbase.toString(),
       feeRecipient: `0x${this.feeRecipient.toBuffer().toString('hex').padStart(64, '0')}`,
@@ -212,7 +228,7 @@ export class CheckpointHeader {
       lastArchive: this.lastArchiveRoot.toString(),
       blockHeadersHash: this.blockHeadersHash.toString(),
       contentCommitment: this.contentCommitment.toInspect(),
-      slotNumber: this.slotNumber.toBigInt(),
+      slotNumber: this.slotNumber,
       timestamp: this.timestamp,
       coinbase: this.coinbase.toString(),
       feeRecipient: this.feeRecipient.toString(),
@@ -227,7 +243,7 @@ export class CheckpointHeader {
   lastArchiveRoot: ${this.lastArchiveRoot.toString()},
   blockHeadersHash: ${this.blockHeadersHash.toString()},
   contentCommitment: ${inspect(this.contentCommitment)},
-  slotNumber: ${this.slotNumber.toBigInt()},
+  slotNumber: ${this.slotNumber},
   timestamp: ${this.timestamp},
   coinbase: ${this.coinbase.toString()},
   feeRecipient: ${this.feeRecipient.toString()},

@@ -1,7 +1,10 @@
 import { createLogger } from '@aztec/aztec.js/log';
 import type { RollupCheatCodes } from '@aztec/aztec/testing';
-import type { L1ContractAddresses, ViemPublicClient } from '@aztec/ethereum';
+import type { L1ContractAddresses } from '@aztec/ethereum/l1-contract-addresses';
+import type { ViemPublicClient } from '@aztec/ethereum/types';
+import type { CheckpointNumber } from '@aztec/foundation/branded-types';
 import type { Logger } from '@aztec/foundation/log';
+import { promiseWithResolvers } from '@aztec/foundation/promise';
 import { makeBackoff, retry } from '@aztec/foundation/retry';
 import { schemas } from '@aztec/foundation/schemas';
 import { sleep } from '@aztec/foundation/sleep';
@@ -29,6 +32,7 @@ const testConfigSchema = z.object({
   L1_RPC_URLS_JSON: z.string().optional(),
   L1_ACCOUNT_MNEMONIC: z.string().optional(),
   AZTEC_SLOT_DURATION: z.coerce.number().optional().default(24),
+  AZTEC_EPOCH_DURATION: z.coerce.number().optional().default(32),
   AZTEC_PROOF_SUBMISSION_WINDOW: z.coerce.number().optional().default(5),
 });
 
@@ -160,9 +164,42 @@ export async function startPortForward({
   return { process, port };
 }
 
-export function startPortForwardForRPC(namespace: string) {
+export function getExternalIP(namespace: string, serviceName: string): Promise<string> {
+  const { promise, resolve, reject } = promiseWithResolvers<string>();
+  const process = spawn(
+    'kubectl',
+    [
+      'get',
+      'service',
+      '-n',
+      namespace,
+      `${namespace}-${serviceName}`,
+      '--output',
+      "jsonpath='{.status.loadBalancer.ingress[0].ip}'",
+    ],
+    {
+      stdio: 'pipe',
+    },
+  );
+
+  let ip = '';
+  process.stdout.on('data', data => {
+    ip += data;
+  });
+  process.on('error', err => {
+    reject(err);
+  });
+  process.on('exit', () => {
+    // kubectl prints JSON. Remove the quotes
+    resolve(ip.replace(/"|'/g, ''));
+  });
+
+  return promise;
+}
+
+export function startPortForwardForRPC(namespace: string, index = 0) {
   return startPortForward({
-    resource: `services/${namespace}-rpc-aztec-node`,
+    resource: `pod/${namespace}-rpc-aztec-node-${index}`,
     namespace,
     containerPort: 8080,
   });
@@ -208,11 +245,11 @@ export async function deleteResourceByLabel({
   timeout?: string;
   force?: boolean;
 }) {
-  // Check if the resource type exists before attempting to delete
   try {
-    await execAsync(
-      `kubectl api-resources --api-group="" --no-headers -o name | grep -q "^${resource}$" || kubectl api-resources --no-headers -o name | grep -q "^${resource}$"`,
-    );
+    // Match both plain and group-qualified names (e.g., "podchaos" or "podchaos.chaos-mesh.org")
+    const escaped = resource.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const regex = `(^|\\.)${escaped}(\\.|$)`;
+    await execAsync(`kubectl api-resources --no-headers -o name | grep -Eq '${regex}'`);
   } catch (error) {
     logger.warn(`Resource type '${resource}' not found in cluster, skipping deletion ${error}`);
     return '';
@@ -243,6 +280,58 @@ export async function waitForResourceByLabel({
   logger.info(`command: ${command}`);
   const { stdout } = await execAsync(command);
   return stdout;
+}
+
+export async function waitForResourceByName({
+  resource,
+  name,
+  namespace,
+  condition = 'Ready',
+  timeout = '10m',
+}: {
+  resource: string;
+  name: string;
+  namespace: string;
+  condition?: string;
+  timeout?: string;
+}) {
+  const command = `kubectl wait ${resource}/${name} --for=condition=${condition} -n ${namespace} --timeout=${timeout}`;
+  logger.info(`command: ${command}`);
+  const { stdout } = await execAsync(command);
+  return stdout;
+}
+
+export async function waitForResourcesByName({
+  resource,
+  names,
+  namespace,
+  condition = 'Ready',
+  timeout = '10m',
+}: {
+  resource: string;
+  names: string[];
+  namespace: string;
+  condition?: string;
+  timeout?: string;
+}) {
+  if (!names.length) {
+    throw new Error(`No ${resource} names provided to waitForResourcesByName`);
+  }
+
+  // Wait all in parallel; if any fails, surface which one.
+  await Promise.all(
+    names.map(async name => {
+      try {
+        await waitForResourceByName({ resource, name, namespace, condition, timeout });
+      } catch (err) {
+        throw new Error(
+          `Failed waiting for ${resource}/${name} condition=${condition} timeout=${timeout} namespace=${namespace}: ${String(
+            err,
+          )}`,
+        );
+      }
+    }),
+  );
 }
 
 export function getChartDir(spartanDir: string, chartName: string) {
@@ -295,6 +384,61 @@ async function execHelmCommand(args: Parameters<typeof createHelmCommand>[0]) {
   return stdout;
 }
 
+async function getHelmReleaseStatus(instanceName: string, namespace: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execAsync(
+      `helm list --namespace ${namespace} --all --filter '^${instanceName}$' --output json | cat`,
+    );
+    const parsed = JSON.parse(stdout) as Array<{ name?: string; status?: string }>;
+    const row = parsed.find(r => r.name === instanceName);
+    return row?.status;
+  } catch {
+    return undefined;
+  }
+}
+
+async function forceDeleteHelmReleaseRecord(instanceName: string, namespace: string, logger: Logger) {
+  const labelSelector = `owner=helm,name=${instanceName}`;
+  const cmd = `kubectl delete secret -n ${namespace} -l ${labelSelector} --ignore-not-found=true`;
+  logger.warn(`Force deleting Helm release record: ${cmd}`);
+  await execAsync(cmd).catch(() => undefined);
+}
+
+async function hasDeployedHelmRelease(instanceName: string, namespace: string): Promise<boolean> {
+  try {
+    const status = await getHelmReleaseStatus(instanceName, namespace);
+    return status?.toLowerCase() === 'deployed';
+  } catch {
+    return false;
+  }
+}
+
+export async function uninstallChaosMesh(instanceName: string, namespace: string, logger: Logger) {
+  // uninstall the helm chart if it exists
+  logger.info(`Uninstalling helm chart ${instanceName}`);
+  await execAsync(`helm uninstall ${instanceName} --namespace ${namespace} --wait --ignore-not-found`);
+  // and delete the chaos-mesh resources created by this release
+  const deleteByLabel = async (resource: string) => {
+    const args = {
+      resource,
+      namespace: namespace,
+      label: `app.kubernetes.io/instance=${instanceName}`,
+    } as const;
+    logger.info(`Deleting ${resource} resources for release ${instanceName}`);
+    await deleteResourceByLabel(args).catch(e => {
+      logger.error(`Error deleting ${resource}: ${e}`);
+      logger.info(`Force deleting ${resource}`);
+      return deleteResourceByLabel({ ...args, force: true });
+    });
+  };
+
+  await deleteByLabel('podchaos');
+  await deleteByLabel('networkchaos');
+  await deleteByLabel('podnetworkchaos');
+  await deleteByLabel('workflows');
+  await deleteByLabel('workflownodes');
+}
+
 /**
  * Installs a Helm chart with the given parameters.
  * @param instanceName - The name of the Helm chart instance.
@@ -317,7 +461,6 @@ export async function installChaosMeshChart({
   targetNamespace,
   valuesFile,
   helmChartDir,
-  chaosMeshNamespace = 'chaos-mesh',
   timeout = '10m',
   clean = true,
   values = {},
@@ -334,32 +477,13 @@ export async function installChaosMeshChart({
   logger: Logger;
 }) {
   if (clean) {
-    // uninstall the helm chart if it exists
-    logger.info(`Uninstalling helm chart ${instanceName}`);
-    await execAsync(`helm uninstall ${instanceName} --namespace ${chaosMeshNamespace} --wait --ignore-not-found`);
-    // and delete the chaos-mesh resources created by this release
-    const deleteByLabel = async (resource: string) => {
-      const args = {
-        resource,
-        namespace: chaosMeshNamespace,
-        label: `app.kubernetes.io/instance=${instanceName}`,
-      } as const;
-      logger.info(`Deleting ${resource} resources for release ${instanceName}`);
-      await deleteResourceByLabel(args).catch(e => {
-        logger.error(`Error deleting ${resource}: ${e}`);
-        logger.info(`Force deleting ${resource}`);
-        return deleteResourceByLabel({ ...args, force: true });
-      });
-    };
-
-    await deleteByLabel('podchaos');
-    await deleteByLabel('networkchaos');
+    await uninstallChaosMesh(instanceName, targetNamespace, logger);
   }
 
   return execHelmCommand({
     instanceName,
     helmChartDir,
-    namespace: chaosMeshNamespace,
+    namespace: targetNamespace,
     valuesFile,
     timeout,
     values: { ...values, 'global.targetNamespace': targetNamespace },
@@ -389,68 +513,30 @@ export function applyProverFailure({
   });
 }
 
+export function applyValidatorFailure({
+  namespace,
+  spartanDir,
+  logger,
+  values,
+  instanceName,
+}: {
+  namespace: string;
+  spartanDir: string;
+  logger: Logger;
+  values?: Record<string, string | number>;
+  instanceName?: string;
+}) {
+  return installChaosMeshChart({
+    instanceName: instanceName ?? 'validator-failure',
+    targetNamespace: namespace,
+    valuesFile: 'validator-failure.yaml',
+    helmChartDir: getChartDir(spartanDir, 'aztec-chaos-scenarios'),
+    values,
+    logger,
+  });
+}
+
 export function applyProverKill({
-  namespace,
-  spartanDir,
-  logger,
-}: {
-  namespace: string;
-  spartanDir: string;
-  logger: Logger;
-}) {
-  return installChaosMeshChart({
-    instanceName: 'prover-kill',
-    targetNamespace: namespace,
-    valuesFile: 'prover-kill.yaml',
-    helmChartDir: getChartDir(spartanDir, 'aztec-chaos-scenarios'),
-    clean: true,
-    logger,
-  });
-}
-
-export function applyProverBrokerKill({
-  namespace,
-  spartanDir,
-  logger,
-}: {
-  namespace: string;
-  spartanDir: string;
-  logger: Logger;
-}) {
-  return installChaosMeshChart({
-    instanceName: 'prover-broker-kill',
-    targetNamespace: namespace,
-    valuesFile: 'prover-broker-kill.yaml',
-    helmChartDir: getChartDir(spartanDir, 'aztec-chaos-scenarios'),
-    clean: true,
-    logger,
-  });
-}
-
-export function applyBootNodeFailure({
-  namespace,
-  spartanDir,
-  durationSeconds,
-  logger,
-}: {
-  namespace: string;
-  spartanDir: string;
-  durationSeconds: number;
-  logger: Logger;
-}) {
-  return installChaosMeshChart({
-    instanceName: 'boot-node-failure',
-    targetNamespace: namespace,
-    valuesFile: 'boot-node-failure.yaml',
-    helmChartDir: getChartDir(spartanDir, 'aztec-chaos-scenarios'),
-    values: {
-      'bootNodeFailure.duration': `${durationSeconds}s`,
-    },
-    logger,
-  });
-}
-
-export function applyValidatorKill({
   namespace,
   spartanDir,
   logger,
@@ -462,28 +548,108 @@ export function applyValidatorKill({
   values?: Record<string, string | number>;
 }) {
   return installChaosMeshChart({
-    instanceName: 'validator-kill',
+    instanceName: 'prover-kill',
+    targetNamespace: namespace,
+    valuesFile: 'prover-kill.yaml',
+    helmChartDir: getChartDir(spartanDir, 'aztec-chaos-scenarios'),
+    chaosMeshNamespace: namespace,
+    clean: true,
+    logger,
+    values,
+  });
+}
+
+export function applyProverBrokerKill({
+  namespace,
+  spartanDir,
+  logger,
+  values,
+}: {
+  namespace: string;
+  spartanDir: string;
+  logger: Logger;
+  values?: Record<string, string | number>;
+}) {
+  return installChaosMeshChart({
+    instanceName: 'prover-broker-kill',
+    targetNamespace: namespace,
+    valuesFile: 'prover-broker-kill.yaml',
+    helmChartDir: getChartDir(spartanDir, 'aztec-chaos-scenarios'),
+    clean: true,
+    logger,
+    values,
+  });
+}
+
+export function applyBootNodeFailure({
+  instanceName = 'boot-node-failure',
+  namespace,
+  spartanDir,
+  durationSeconds,
+  logger,
+  values,
+}: {
+  instanceName?: string;
+  namespace: string;
+  spartanDir: string;
+  durationSeconds: number;
+  logger: Logger;
+  values?: Record<string, string | number>;
+}) {
+  return installChaosMeshChart({
+    instanceName,
+    targetNamespace: namespace,
+    valuesFile: 'boot-node-failure.yaml',
+    helmChartDir: getChartDir(spartanDir, 'aztec-chaos-scenarios'),
+    values: {
+      'bootNodeFailure.duration': `${durationSeconds}s`,
+      ...(values ?? {}),
+    },
+    logger,
+  });
+}
+
+export function applyValidatorKill({
+  instanceName = 'validator-kill',
+  namespace,
+  spartanDir,
+  logger,
+  values,
+  clean = true,
+}: {
+  instanceName?: string;
+  namespace: string;
+  spartanDir: string;
+  logger: Logger;
+  values?: Record<string, string | number>;
+  clean?: boolean;
+}) {
+  return installChaosMeshChart({
+    instanceName: instanceName ?? 'validator-kill',
     targetNamespace: namespace,
     valuesFile: 'validator-kill.yaml',
     helmChartDir: getChartDir(spartanDir, 'aztec-chaos-scenarios'),
+    clean,
     logger,
     values,
   });
 }
 
 export function applyNetworkShaping({
+  instanceName = 'network-shaping',
   valuesFile,
   namespace,
   spartanDir,
   logger,
 }: {
+  instanceName?: string;
   valuesFile: string;
   namespace: string;
   spartanDir: string;
   logger: Logger;
 }) {
   return installChaosMeshChart({
-    instanceName: 'network-shaping',
+    instanceName,
     targetNamespace: namespace,
     valuesFile,
     helmChartDir: getChartDir(spartanDir, 'aztec-chaos-scenarios'),
@@ -491,24 +657,24 @@ export function applyNetworkShaping({
   });
 }
 
-export async function awaitL2BlockNumber(
+export async function awaitCheckpointNumber(
   rollupCheatCodes: RollupCheatCodes,
-  blockNumber: bigint,
+  checkpointNumber: CheckpointNumber,
   timeoutSeconds: number,
   logger: Logger,
 ) {
-  logger.info(`Waiting for L2 Block ${blockNumber}`);
+  logger.info(`Waiting for checkpoint ${checkpointNumber}`);
   let tips = await rollupCheatCodes.getTips();
   const endTime = Date.now() + timeoutSeconds * 1000;
-  while (tips.pending < blockNumber && Date.now() < endTime) {
-    logger.info(`At L2 Block ${tips.pending}`);
+  while (tips.pending < checkpointNumber && Date.now() < endTime) {
+    logger.info(`At checkpoint ${tips.pending}`);
     await sleep(1000);
     tips = await rollupCheatCodes.getTips();
   }
-  if (tips.pending < blockNumber) {
-    throw new Error(`Timeout waiting for L2 Block ${blockNumber}, only reached ${tips.pending}`);
+  if (tips.pending < checkpointNumber) {
+    throw new Error(`Timeout waiting for checkpoint ${checkpointNumber}, only reached ${tips.pending}`);
   } else {
-    logger.info(`Reached L2 Block ${tips.pending}`);
+    logger.info(`Reached checkpoint ${tips.pending}`);
   }
 }
 
@@ -582,6 +748,12 @@ export async function installTransferBot({
     'bot.node.env.ETHEREUM_HOSTS': `http://${namespace}-eth-execution.${namespace}.svc.cluster.local:8545`,
     // Provide L1 mnemonic for bridging (falls back to labs mnemonic)
     'bot.node.env.BOT_L1_MNEMONIC': mnemonic,
+
+    // The bot does not need Kubernetes API access. Disable RBAC + ServiceAccount creation so the chart
+    // can be installed by users without cluster-scoped RBAC permissions.
+    'bot.rbac.create': false,
+    'bot.serviceAccount.create': false,
+    'bot.serviceAccount.name': 'default',
   };
   // Ensure we derive a funded L1 key (index 0 is funded on anvil default mnemonic)
   if (mnemonicStartIndex === undefined) {
@@ -606,7 +778,7 @@ export async function installTransferBot({
   if (!repository || !tag) {
     try {
       const { stdout } = await execAsync(
-        `kubectl get pods -l app.kubernetes.io/component=validator -n ${namespace} -o jsonpath='{.items[0].spec.containers[?(@.name=="aztec")].image}' | cat`,
+        `kubectl get pods -l app.kubernetes.io/name=validator -n ${namespace} -o jsonpath='{.items[0].spec.containers[?(@.name=="aztec")].image}' | cat`,
       );
       const image = stdout.trim().replace(/^'|'$/g, '');
       if (image && image.includes(':')) {
@@ -627,6 +799,26 @@ export async function installTransferBot({
       typeof mnemonicStartIndex === 'string' ? mnemonicStartIndex : Number(mnemonicStartIndex);
   }
 
+  // If a previous install attempt left the release in a non-deployed state (e.g. FAILED),
+  // `helm upgrade --install` can error with "has no deployed releases".
+  // In that case, clear the release record and do a clean install.
+  const existingStatus = await getHelmReleaseStatus(instanceName, namespace);
+  if (existingStatus && existingStatus.toLowerCase() !== 'deployed') {
+    logger.warn(`Transfer bot release ${instanceName} is in status '${existingStatus}'. Reinstalling cleanly.`);
+    await execAsync(`helm uninstall ${instanceName} --namespace ${namespace} --wait --ignore-not-found`).catch(
+      () => undefined,
+    );
+    // If helm left the release in `uninstalling`, force-delete the record so we can reinstall.
+    const afterUninstallStatus = await getHelmReleaseStatus(instanceName, namespace);
+    if (afterUninstallStatus?.toLowerCase() === 'uninstalling') {
+      await forceDeleteHelmReleaseRecord(instanceName, namespace, logger);
+    }
+  }
+
+  // `--reuse-values` fails if the release has never successfully deployed (e.g. first install, or a previous failed install).
+  // Only reuse values when we have a deployed release to reuse from.
+  const effectiveReuseValues = reuseValues && (await hasDeployedHelmRelease(instanceName, namespace));
+
   await execHelmCommand({
     instanceName,
     helmChartDir,
@@ -634,7 +826,7 @@ export async function installTransferBot({
     valuesFile: undefined,
     timeout,
     values: values as unknown as Record<string, string | number | boolean>,
-    reuseValues,
+    reuseValues: effectiveReuseValues,
   });
 
   if (replicas > 0) {
@@ -679,7 +871,7 @@ export async function setValidatorTxDrop({
   const drop = enabled ? 'true' : 'false';
   const prob = String(probability);
 
-  const selectors = ['app=validator', 'app.kubernetes.io/component=validator'];
+  const selectors = ['app.kubernetes.io/name=validator', 'app.kubernetes.io/component=validator', 'app=validator'];
   let updated = false;
   for (const selector of selectors) {
     try {
@@ -710,7 +902,7 @@ export async function setValidatorTxDrop({
 }
 
 export async function restartValidators(namespace: string, logger: Logger) {
-  const selectors = ['app=validator', 'app.kubernetes.io/component=validator'];
+  const selectors = ['app.kubernetes.io/name=validator', 'app.kubernetes.io/component=validator', 'app=validator'];
   let any = false;
   for (const selector of selectors) {
     try {
@@ -765,11 +957,33 @@ export async function enableValidatorDynamicBootNode(
 }
 
 export async function getSequencers(namespace: string) {
-  const command = `kubectl get pods -l app.kubernetes.io/component=validator -n ${namespace} -o jsonpath='{.items[*].metadata.name}'`;
-  const { stdout } = await execAsync(command);
-  const sequencers = stdout.split(' ');
-  logger.verbose(`Found sequencer pods ${sequencers.join(', ')}`);
-  return sequencers;
+  const selectors = [
+    'app.kubernetes.io/name=validator',
+    'app.kubernetes.io/component=validator',
+    'app.kubernetes.io/component=sequencer-node',
+    'app=validator',
+  ];
+  for (const selector of selectors) {
+    try {
+      const command = `kubectl get pods -l ${selector} -n ${namespace} -o jsonpath='{.items[*].metadata.name}'`;
+      const { stdout } = await execAsync(command);
+      const sequencers = stdout
+        .split(' ')
+        .map(s => s.trim())
+        .filter(Boolean);
+      if (sequencers.length > 0) {
+        logger.verbose(`Found sequencer pods ${sequencers.join(', ')} (selector=${selector})`);
+        return sequencers;
+      }
+    } catch {
+      // try next selector
+    }
+  }
+
+  // Fail fast instead of returning [''] which leads to attempts to port-forward `pod/`.
+  throw new Error(
+    `No sequencer/validator pods found in namespace ${namespace}. Tried selectors: ${selectors.join(', ')}`,
+  );
 }
 
 export function updateSequencersConfig(env: TestConfig, config: Partial<AztecNodeAdminConfig>) {
@@ -830,7 +1044,7 @@ export async function getPublicViemClient(
       containerPort: 8545,
     });
     const url = `http://127.0.0.1:${port}`;
-    const client: ViemPublicClient = createPublicClient({ transport: fallback([http(url)]) });
+    const client: ViemPublicClient = createPublicClient({ transport: fallback([http(url, { batch: false })]) });
     if (processes) {
       processes.push(process);
     }
@@ -840,7 +1054,9 @@ export async function getPublicViemClient(
     if (!L1_RPC_URLS_JSON) {
       throw new Error(`L1_RPC_URLS_JSON is not defined`);
     }
-    const client: ViemPublicClient = createPublicClient({ transport: fallback([http(L1_RPC_URLS_JSON)]) });
+    const client: ViemPublicClient = createPublicClient({
+      transport: fallback([http(L1_RPC_URLS_JSON, { batch: false })]),
+    });
     return { url: L1_RPC_URLS_JSON, client };
   }
 }

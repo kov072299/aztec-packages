@@ -1,5 +1,6 @@
-import { Secp256k1Signer } from '@aztec/foundation/crypto';
-import { Fr } from '@aztec/foundation/fields';
+import { SlotNumber } from '@aztec/foundation/branded-types';
+import { Secp256k1Signer } from '@aztec/foundation/crypto/secp256k1-signer';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import type { AztecAsyncKVStore } from '@aztec/kv-store';
 import { openTmpStore } from '@aztec/kv-store/lmdb-v2';
 import { makeBlockProposal, makeL2BlockHeader } from '@aztec/stdlib/testing';
@@ -61,7 +62,7 @@ describe('KV Attestation Pool', () => {
 
       // We should now be at cap
       expect(
-        await kvAttestationPool.hasReachedAttestationCap(BigInt(slotNumber), archive.toString(), committeeSize),
+        await kvAttestationPool.hasReachedAttestationCap(SlotNumber(slotNumber), archive.toString(), committeeSize),
       ).toBe(true);
 
       // A new attestation from a new signer should not be accepted (per validation helper semantics)

@@ -1,3 +1,4 @@
+import { SlotNumber } from '@aztec/foundation/branded-types';
 import { EthAddress } from '@aztec/foundation/eth-address';
 import { createLogger } from '@aztec/foundation/log';
 import { retryUntil } from '@aztec/foundation/retry';
@@ -67,8 +68,8 @@ export class EmpireSlashingProposerContract extends EventEmitter implements IEmp
     return this.proposer.read.getCurrentRound();
   }
 
-  public computeRound(slot: bigint): Promise<bigint> {
-    return this.proposer.read.computeRound([slot]);
+  public computeRound(slot: SlotNumber): Promise<bigint> {
+    return this.proposer.read.computeRound([BigInt(slot)]);
   }
 
   public getInstance() {
@@ -78,8 +79,18 @@ export class EmpireSlashingProposerContract extends EventEmitter implements IEmp
   public async getRoundInfo(
     rollupAddress: Hex,
     round: bigint,
-  ): Promise<{ lastSignalSlot: bigint; payloadWithMostSignals: Hex; executed: boolean }> {
-    return await this.proposer.read.getRoundData([rollupAddress, round]);
+  ): Promise<{ lastSignalSlot: SlotNumber; payloadWithMostSignals: Hex; quorumReached: boolean; executed: boolean }> {
+    const result = await this.proposer.read.getRoundData([rollupAddress, round]);
+    const [signalCount, quorum] = await Promise.all([
+      this.proposer.read.signalCount([rollupAddress, round, result.payloadWithMostSignals]),
+      this.getQuorumSize(),
+    ]);
+    return {
+      lastSignalSlot: SlotNumber.fromBigInt(result.lastSignalSlot),
+      payloadWithMostSignals: result.payloadWithMostSignals,
+      quorumReached: signalCount >= quorum,
+      executed: result.executed,
+    };
   }
 
   public getPayloadSignals(rollupAddress: Hex, round: bigint, payload: Hex): Promise<bigint> {
@@ -95,7 +106,7 @@ export class EmpireSlashingProposerContract extends EventEmitter implements IEmp
 
   public async createSignalRequestWithSignature(
     payload: Hex,
-    slot: bigint,
+    slot: SlotNumber,
     chainId: number,
     signerAddress: Hex,
     signer: (msg: TypedDataDefinition) => Promise<Hex>,

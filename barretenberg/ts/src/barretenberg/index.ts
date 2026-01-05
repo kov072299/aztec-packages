@@ -1,12 +1,19 @@
 import { Crs, GrumpkinCrs } from '../crs/index.js';
-import { createDebugLogger } from '../log/index.js';
 import { AsyncApi } from '../cbind/generated/async.js';
 import { SyncApi } from '../cbind/generated/sync.js';
 import { IMsgpackBackendSync, IMsgpackBackendAsync } from '../bb_backends/interface.js';
 import { BackendOptions, BackendType } from '../bb_backends/index.js';
 import { createAsyncBackend, createSyncBackend } from '../bb_backends/node/index.js';
 
-export { UltraHonkBackend, UltraHonkVerifierBackend, AztecClientBackend } from './backend.js';
+export {
+  UltraHonkBackend,
+  UltraHonkVerifierBackend,
+  AztecClientBackend,
+  fieldToString,
+  fieldsToStrings,
+  type UltraHonkBackendOptions,
+  type VerifierTarget,
+} from './backend.js';
 export * from '../bb_backends/index.js';
 
 export type CircuitOptions = {
@@ -35,7 +42,7 @@ export class Barretenberg extends AsyncApi {
    *   2. WasmWorker (in browser) or Wasm (in Node.js)
    */
   static async new(options: BackendOptions = {}) {
-    const logger = options.logger ?? createDebugLogger('bb_async');
+    const logger = options.logger ?? (() => {});
 
     if (options.backend) {
       // Explicit backend required - no fallback
@@ -167,18 +174,18 @@ export class BarretenbergSync extends SyncApi {
    * Not supported: WasmWorker (no workers in sync), NativeUnixSocket (async only)
    */
   static async new(options: BackendOptions = {}) {
-    const logger = options.logger ?? createDebugLogger('bb_sync');
+    const logger = options.logger ?? (() => {});
 
     if (options.backend) {
       return await createSyncBackend(options.backend, options, logger);
     }
 
     // Try native, fallback to WASM.
-    // try {
-    //   return await createSyncBackend(BackendType.NativeSharedMemory, options, logger);
-    // } catch (err: any) {
-    //   logger(`Shared memory unavailable (${err.message}), falling back to WASM`);
-    // }
+    try {
+      return await createSyncBackend(BackendType.NativeSharedMemory, options, logger);
+    } catch (err: any) {
+      logger(`Shared memory unavailable (${err.message}), falling back to WASM`);
+    }
 
     return await createSyncBackend(BackendType.Wasm, options, logger);
   }

@@ -92,6 +92,7 @@ dlazy
 Dlazy
 DLAZY
 donʼt
+downsampling
 dstsize
 ECADD
 ECCVM
@@ -243,6 +244,7 @@ protoocols
 Protostar
 Prviate
 Prysm
+pseudorandomly
 publically
 Quicknode
 ragequit
@@ -266,6 +268,7 @@ Returndata
 revertdata
 rollupʼs
 RSSH
+rustc
 sendl
 SENDL
 serde
@@ -364,3 +367,7 @@ nothin
 whoooaa
 flamegraphs
 mycontract
+notegetteroptions
+lookback
+noirfmt
+postprocesses

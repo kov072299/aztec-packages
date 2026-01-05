@@ -1,4 +1,5 @@
-import type { Fr } from '@aztec/foundation/fields';
+import type { BlockNumber } from '@aztec/foundation/branded-types';
+import type { Fr } from '@aztec/foundation/curves/bn254';
 import type { Timer } from '@aztec/foundation/timer';
 
 import type { L2Block } from '../block/l2_block.js';
@@ -59,7 +60,17 @@ export interface BuildBlockResult {
 
 export type FullNodeBlockBuilderConfig = Pick<L1RollupConstants, 'l1GenesisTime' | 'slotDuration'> &
   Pick<ChainConfig, 'l1ChainId' | 'rollupVersion'> &
-  Pick<SequencerConfig, 'txPublicSetupAllowList' | 'fakeProcessingDelayPerTxMs'>;
+  Pick<SequencerConfig, 'txPublicSetupAllowList' | 'fakeProcessingDelayPerTxMs' | 'fakeThrowAfterProcessingTxCount'>;
+
+export const FullNodeBlockBuilderConfigKeys: (keyof FullNodeBlockBuilderConfig)[] = [
+  'l1GenesisTime',
+  'slotDuration',
+  'l1ChainId',
+  'rollupVersion',
+  'txPublicSetupAllowList',
+  'fakeProcessingDelayPerTxMs',
+  'fakeThrowAfterProcessingTxCount',
+] as const;
 
 export interface IFullNodeBlockBuilder {
   getConfig(): FullNodeBlockBuilderConfig;
@@ -74,5 +85,5 @@ export interface IFullNodeBlockBuilder {
     fork?: MerkleTreeWriteOperations,
   ): Promise<BuildBlockResult>;
 
-  getFork(blockNumber: number): Promise<MerkleTreeWriteOperations>;
+  getFork(blockNumber: BlockNumber): Promise<MerkleTreeWriteOperations>;
 }

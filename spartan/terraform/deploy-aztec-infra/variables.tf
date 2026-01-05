@@ -21,6 +21,12 @@ variable "GCP_REGION" {
   type    = string
 }
 
+variable "FULL_NODE_RESOURCE_PROFILE" {
+  description = "Resource profile to use for the full node"
+  type        = string
+  default     = "prod"
+}
+
 variable "P2P_BOOTSTRAP_RESOURCE_PROFILE" {
   description = "Resource profile to use for the p2p bootstrap"
   type        = string
@@ -49,6 +55,18 @@ variable "BOT_RESOURCE_PROFILE" {
   description = "Resource profile to use for the bots"
   type        = string
   default     = "prod"
+}
+
+variable "DEBUG_P2P_INSTRUMENT_MESSAGES" {
+  description = "Whether to enable debug instrumentation of P2P messages"
+  type        = bool
+  default     = false
+}
+
+variable "PROVER_TEST_VERIFICATION_DELAY_MS" {
+  description = "The delay (ms) to inject during fake proof verification"
+  type        = number
+  default     = 10
 }
 
 variable "K8S_CLUSTER_CONTEXT" {
@@ -199,6 +217,18 @@ variable "PROVER_REPLICAS" {
   default     = 4
 }
 
+variable "PROVER_TEST_DELAY_TYPE" {
+  description = "The type of test delay to introduce in the prover (fixed, realistic)"
+  type        = string
+  default     = "fixed"
+}
+
+variable "PROVER_AGENT_PROOF_TYPES" {
+  description = "The types of proofs these agents will run. Default: all"
+  type        = list(string)
+  default     = []
+}
+
 variable "PROVER_PUBLISHERS_PER_PROVER" {
   description = "Number of publisher keys per prover"
   type        = string
@@ -231,6 +261,11 @@ variable "PROVER_NODE_DISABLE_PROOF_PUBLISH" {
   default     = false
 }
 
+variable "P2P_MAX_TX_POOL_SIZE" {
+  description = "Maximum size of the P2P transaction pool"
+  type        = string
+  default     = "100000000"
+}
 variable "FISHERMAN_MNEMONIC" {
   description = "The fisherman mnemonic for RPC nodes (used when validators are disabled, e.g., fisherman mode)"
   type        = string
@@ -515,6 +550,12 @@ variable "RPC_REPLICAS" {
   default     = 1
 }
 
+variable "FULL_NODE_REPLICAS" {
+  description = "The number of full node replicas"
+  type        = string
+  default     = 1
+}
+
 variable "P2P_TX_POOL_DELETE_TXS_AFTER_REORG" {
   description = "Whether to delete transactions from the P2P transaction pool after a reorg"
   type        = bool
@@ -533,8 +574,83 @@ variable "BLOB_ALLOW_EMPTY_SOURCES" {
   default     = false
 }
 
+variable "PROVER_AGENT_POLL_INTERVAL_MS" {
+  description = "Interval in milliseconds between prover agent polls"
+  type        = number
+  default     = 1000
+}
+
+variable "PROVER_AGENT_INCLUDE_METRICS" {
+  description = "Metrics whitelist in the prover agent"
+  type        = string
+  default     = null
+}
+
+variable "FULL_NODE_INCLUDE_METRICS" {
+  description = "Metrics whitelist in the full node"
+  type        = string
+  default     = null
+}
+
 variable "FISHERMAN_MODE" {
   description = "Whether to run in fisherman mode"
+  type        = bool
+  default     = false
+}
+
+variable "P2P_GOSSIPSUB_D" {
+  description = "The P2P Gossipsub D parameter"
+  type        = string
+  default     = "6"
+}
+
+variable "P2P_GOSSIPSUB_DLO" {
+  description = "The P2P Gossipsub D parameter"
+  type        = string
+  default     = "4"
+}
+
+variable "P2P_GOSSIPSUB_DHI" {
+  description = "The P2P Gossipsub D parameter"
+  type        = string
+  default     = "12"
+}
+
+variable "P2P_DROP_TX" {
+  description = "Whether to randomly drop incoming transactions in the P2P layer (for testing)"
+  type        = bool
+  default     = false
+}
+
+variable "P2P_DROP_TX_CHANCE" {
+  description = "The chance (0-100) of dropping an incoming transaction in the P2P layer (for testing)"
+  type        = string
+  default     = "0"
+}
+
+variable "WS_NUM_HISTORIC_BLOCKS" {
+  description = "Number of historic blocks for world state"
+  type        = string
+  nullable    = true
+  default     = null
+}
+
+# Controls whether nodes announce public IPs for P2P (true for GKE; set false for kind/local)
+variable "P2P_PUBLIC_IP" {
+  description = "Announce public IP for P2P (set false in kind/local to use pod IPs)"
+  type        = bool
+  default     = true
+}
+
+# Controls whether to expose P2P via NodePort instead of hostPort. Recommended true for KIND/local.
+variable "P2P_NODEPORT_ENABLED" {
+  description = "Enable NodePort for P2P service (true for KIND/local, false for GKE by default)"
+  type        = bool
+  default     = false
+}
+
+variable "DEBUG_FORCE_TX_PROOF_VERIFICATION" {
+  description = "Whether to force tx proof verification. Only has an effect if real proving is turned off"
   type        = bool
   default     = false
 }

@@ -11,6 +11,7 @@ terraform.tfstate*
 .bootstrapped
 .tsbuildinfo
 bench-out
+dumped-avm-circuit-inputs
 
 # Local Netlify folder
 .netlify
@@ -31,3 +32,5 @@ docs/docs/protocol-specs/public-vm/gen/
 
 # for those who use Claude Code
 /.claude
+
+__pycache__

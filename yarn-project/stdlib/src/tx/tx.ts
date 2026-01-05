@@ -1,6 +1,6 @@
 import { Buffer32 } from '@aztec/foundation/buffer';
 import { arraySerializedSizeOfNonEmpty } from '@aztec/foundation/collection';
-import { Fr } from '@aztec/foundation/fields';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import type { ZodFor } from '@aztec/foundation/schemas';
 import { BufferReader, serializeArrayOfBufferableToVector, serializeToBuffer } from '@aztec/foundation/serialize';
 import type { FieldsOf } from '@aztec/foundation/types';
@@ -30,7 +30,11 @@ export class Tx extends Gossipable {
   private calldataMap: Map<string, Fr[]> | undefined;
 
   constructor(
-    /** Identifier of the tx */
+    /**
+     * Identifier of the tx.
+     * It's a hash of the public inputs of the tx's proof.
+     * This claimed hash is reconciled against the tx's public inputs (`this.data`) in data_validator.ts.
+     */
     public readonly txHash: TxHash,
     /**
      * Output of the private kernel circuit for this tx.
@@ -43,11 +47,14 @@ export class Tx extends Gossipable {
     /**
      * Contract class log fields emitted from the tx.
      * Their order should match the order of the log hashes returned from `this.data.getNonEmptyContractClassLogsHashes`.
-     * It's checked in data_validator.ts
+     * This claimed data is reconciled against a hash of this data (that is contained within
+     * the tx's public inputs (`this.data`)), in data_validator.ts.
      */
     public readonly contractClassLogFields: ContractClassLogFields[],
     /**
      * An array of calldata for the enqueued public function calls and the teardown function call.
+     * This claimed data is reconciled against hashes of this data (that are contained within
+     * the tx's public inputs (`this.data`)), in data_validator.ts.
      */
     public readonly publicFunctionCalldata: HashedValues[],
   ) {
@@ -271,11 +278,12 @@ export class Tx extends Gossipable {
   /**
    * Clones a tx, making a deep copy of all fields.
    * @param tx - The transaction to be cloned.
+   * @param cloneProof - Whether to clone the proof as well. If false, will shallow copy.
    * @returns The cloned transaction.
    */
-  static clone(tx: Tx): Tx {
+  static clone(tx: Tx, cloneProof = true): Tx {
     const publicInputs = PrivateKernelTailCircuitPublicInputs.fromBuffer(tx.data.toBuffer());
-    const chonkProof = ChonkProof.fromBuffer(tx.chonkProof.toBuffer());
+    const chonkProof = cloneProof ? ChonkProof.fromBuffer(tx.chonkProof.toBuffer()) : tx.chonkProof;
     const contractClassLogFields = tx.contractClassLogFields.map(p => p.clone());
     const publicFunctionCalldata = tx.publicFunctionCalldata.map(cd => HashedValues.fromBuffer(cd.toBuffer()));
     const clonedTx = new Tx(tx.txHash, publicInputs, chonkProof, contractClassLogFields, publicFunctionCalldata);
@@ -299,8 +307,9 @@ export class Tx extends Gossipable {
   }
 
   /** Recomputes the tx hash. Used for testing purposes only when a property of the tx was mutated. */
-  public async recomputeHash() {
+  public async recomputeHash(): Promise<TxHash> {
     (this as any).txHash = await Tx.computeTxHash(this);
+    return this.txHash;
   }
 
   #combinePublicCallRequestWithCallData(request: PublicCallRequest) {

@@ -7,7 +7,6 @@
 #pragma once
 #include "barretenberg/crypto/ecdsa/ecdsa.hpp"
 #include "barretenberg/dsl/acir_format/witness_constant.hpp"
-#include "barretenberg/serialize/msgpack.hpp"
 #include "barretenberg/stdlib/primitives/byte_array/byte_array.hpp"
 #include <vector>
 
@@ -60,15 +59,11 @@ struct EcdsaConstraint {
     // Expected result of signature verification
     uint32_t result;
 
-    // For serialization, update with any new fields
-    MSGPACK_FIELDS(hashed_message, signature, pub_x_indices, pub_y_indices, predicate, result);
     friend bool operator==(EcdsaConstraint const& lhs, EcdsaConstraint const& rhs) = default;
 };
 
 template <typename Curve>
-void create_ecdsa_verify_constraints(typename Curve::Builder& builder,
-                                     const EcdsaConstraint& input,
-                                     bool has_valid_witness_assignments = true);
+void create_ecdsa_verify_constraints(typename Curve::Builder& builder, const EcdsaConstraint& input);
 
 template <typename Curve>
 void create_dummy_ecdsa_constraint(typename Curve::Builder& builder,

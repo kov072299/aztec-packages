@@ -34,6 +34,9 @@ export const CIRCUIT_SIZE = 'aztec.circuit.size';
 
 export const MEMPOOL_TX_COUNT = 'aztec.mempool.tx_count';
 export const MEMPOOL_TX_SIZE = 'aztec.mempool.tx_size';
+export const MEMPOOL_TX_ADDED_COUNT = 'aztec.mempool.tx_added_count';
+export const MEMPOOL_TX_MINED_DELAY = 'aztec.mempool.tx_mined_delay';
+
 export const DB_NUM_ITEMS = 'aztec.db.num_items';
 export const DB_MAP_SIZE = 'aztec.db.map_size';
 export const DB_PHYSICAL_FILE_SIZE = 'aztec.db.physical_file_size';
@@ -41,6 +44,8 @@ export const DB_USED_SIZE = 'aztec.db.used_size';
 
 export const MEMPOOL_ATTESTATIONS_COUNT = 'aztec.mempool.attestations_count';
 export const MEMPOOL_ATTESTATIONS_SIZE = 'aztec.mempool.attestations_size';
+export const MEMPOOL_ATTESTATIONS_ADDED_COUNT = 'aztec.mempool.attestations_added_count';
+export const MEMPOOL_ATTESTATIONS_MINED_DELAY = 'aztec.mempool.attestations_mined_delay';
 
 export const ARCHIVER_L1_BLOCK_HEIGHT = 'aztec.archiver.l1_block_height';
 export const ARCHIVER_BLOCK_HEIGHT = 'aztec.archiver.block_height';
@@ -60,6 +65,8 @@ export const ARCHIVER_PRUNE_COUNT = 'aztec.archiver.prune_count';
 
 export const ARCHIVER_TOTAL_TXS = 'aztec.archiver.tx_count';
 
+export const ARCHIVER_BLOCK_PROPOSAL_TX_TARGET_COUNT = 'aztec.archiver.block_proposal_tx_target_count';
+
 export const NODE_RECEIVE_TX_DURATION = 'aztec.node.receive_tx.duration';
 export const NODE_RECEIVE_TX_COUNT = 'aztec.node.receive_tx.count';
 
@@ -74,6 +81,8 @@ export const SEQUENCER_CURRENT_BLOCK_REWARDS = 'aztec.sequencer.current_block_re
 export const SEQUENCER_SLOT_COUNT = 'aztec.sequencer.slot.total_count';
 export const SEQUENCER_FILLED_SLOT_COUNT = 'aztec.sequencer.slot.filled_count';
 
+export const SEQUENCER_BLOCK_ATTESTATION_DELAY = 'aztec.sequencer.block.attestation_delay';
+
 export const SEQUENCER_COLLECTED_ATTESTATIONS_COUNT = 'aztec.sequencer.attestations.collected_count';
 export const SEQUENCER_REQUIRED_ATTESTATIONS_COUNT = 'aztec.sequencer.attestations.required_count';
 export const SEQUENCER_COLLECT_ATTESTATIONS_DURATION = 'aztec.sequencer.attestations.collect_duration';
@@ -83,6 +92,20 @@ export const SEQUENCER_BLOCK_PROPOSAL_FAILED_COUNT = 'aztec.sequencer.block.prop
 export const SEQUENCER_BLOCK_PROPOSAL_SUCCESS_COUNT = 'aztec.sequencer.block.proposal_success_count';
 export const SEQUENCER_BLOCK_PROPOSAL_PRECHECK_FAILED_COUNT = 'aztec.sequencer.block.proposal_precheck_failed_count';
 export const SEQUENCER_SLASHING_ATTEMPTS_COUNT = 'aztec.sequencer.slashing.attempts_count';
+export const SEQUENCER_CHECKPOINT_SUCCESS_COUNT = 'aztec.sequencer.checkpoint.success_count';
+
+// Fisherman fee analysis metrics
+export const FISHERMAN_FEE_ANALYSIS_WOULD_BE_INCLUDED = 'aztec.fisherman.fee_analysis.would_be_included';
+export const FISHERMAN_FEE_ANALYSIS_TIME_BEFORE_BLOCK = 'aztec.fisherman.fee_analysis.time_before_block';
+export const FISHERMAN_FEE_ANALYSIS_PENDING_BLOB_TX_COUNT = 'aztec.fisherman.fee_analysis.pending_blob_tx_count';
+export const FISHERMAN_FEE_ANALYSIS_INCLUDED_BLOB_TX_COUNT = 'aztec.fisherman.fee_analysis.included_blob_tx_count';
+export const FISHERMAN_FEE_ANALYSIS_CALCULATED_PRIORITY_FEE = 'aztec.fisherman.fee_analysis.calculated_priority_fee';
+export const FISHERMAN_FEE_ANALYSIS_PRIORITY_FEE_DELTA = 'aztec.fisherman.fee_analysis.priority_fee_delta';
+export const FISHERMAN_FEE_ANALYSIS_ESTIMATED_COST = 'aztec.fisherman.fee_analysis.estimated_cost';
+export const FISHERMAN_FEE_ANALYSIS_ESTIMATED_OVERPAYMENT = 'aztec.fisherman.fee_analysis.estimated_overpayment';
+export const FISHERMAN_FEE_ANALYSIS_MINED_BLOB_TX_PRIORITY_FEE =
+  'aztec.fisherman.fee_analysis.mined_blob_tx_priority_fee';
+export const FISHERMAN_FEE_ANALYSIS_MINED_BLOB_TX_TOTAL_COST = 'aztec.fisherman.fee_analysis.mined_blob_tx_total_cost';
 
 export const VALIDATOR_INVALID_ATTESTATION_RECEIVED_COUNT = 'aztec.validator.invalid_attestation_received_count';
 
@@ -119,6 +142,9 @@ export const L1_TX_BLOB_FEE = 'aztec.l1_tx.blob_fee';
 export const PEER_MANAGER_GOODBYES_SENT = 'aztec.peer_manager.goodbyes_sent';
 export const PEER_MANAGER_GOODBYES_RECEIVED = 'aztec.peer_manager.goodbyes_received';
 export const PEER_MANAGER_PEER_COUNT = 'aztec.peer_manager.peer_count';
+export const PEER_MANAGER_LOW_SCORE_DISCONNECTS = 'aztec.peer_manager.low_score_disconnects';
+export const PEER_MANAGER_PEER_CONNECTION_DURATION = 'aztec.peer_manager.peer_connection_duration';
+export const P2P_PEER_STATE_COUNT = 'aztec.p2p.peer_state_count';
 
 export const P2P_REQ_RESP_SENT_REQUESTS = 'aztec.p2p.req_resp.sent_requests';
 export const P2P_REQ_RESP_RECEIVED_REQUESTS = 'aztec.p2p.req_resp.received_requests';
@@ -128,6 +154,7 @@ export const P2P_REQ_RESP_FAILED_INBOUND_REQUESTS = 'aztec.p2p.req_resp.failed_i
 export const P2P_GOSSIP_MESSAGE_VALIDATION_DURATION = 'aztec.p2p.gossip.message_validation_duration';
 export const P2P_GOSSIP_MESSAGE_PREVALIDATION_COUNT = 'aztec.p2p.gossip.message_validation_count';
 export const P2P_GOSSIP_MESSAGE_LATENCY = 'aztec.p2p.gossip.message_latency';
+export const P2P_GOSSIP_TX_RECEIVED_COUNT = 'aztec.p2p.gossip.tx_received_count';
 
 export const P2P_GOSSIP_AGG_MESSAGE_LATENCY_MIN = 'aztec.p2p.gossip.agg_message_latency_min';
 export const P2P_GOSSIP_AGG_MESSAGE_LATENCY_MAX = 'aztec.p2p.gossip.agg_message_latency_max';
@@ -166,8 +193,6 @@ export const PUBLIC_EXECUTOR_SIMULATION_BYTECODE_SIZE = 'aztec.public_executor.s
 export const PROVING_ORCHESTRATOR_BASE_ROLLUP_INPUTS_DURATION =
   'aztec.proving_orchestrator.base_rollup.inputs_duration';
 
-export const PROVING_ORCHESTRATOR_AVM_FALLBACK_COUNT = 'aztec.proving_orchestrator.avm.fallback_count';
-
 export const PROVING_QUEUE_JOB_SIZE = 'aztec.proving_queue.job_size';
 export const PROVING_QUEUE_SIZE = 'aztec.proving_queue.size';
 export const PROVING_QUEUE_TOTAL_JOBS = 'aztec.proving_queue.enqueued_jobs_count';
@@ -187,6 +212,7 @@ export const PROVING_AGENT_IDLE = 'aztec.proving_queue.agent.idle';
 
 export const PROVER_NODE_EXECUTION_DURATION = 'aztec.prover_node.execution.duration';
 export const PROVER_NODE_JOB_DURATION = 'aztec.prover_node.job_duration';
+export const PROVER_NODE_JOB_CHECKPOINTS = 'aztec.prover_node.job_checkpoints';
 export const PROVER_NODE_JOB_BLOCKS = 'aztec.prover_node.job_blocks';
 export const PROVER_NODE_JOB_TRANSACTIONS = 'aztec.prover_node.job_transactions';
 export const PROVER_NODE_REWARDS_TOTAL = 'aztec.prover_node.rewards_total';
@@ -238,6 +264,8 @@ export const TX_PROVIDER_TXS_FROM_PROPOSALS_COUNT = 'aztec.tx_collector.txs_from
 export const TX_PROVIDER_TXS_FROM_MEMPOOL_COUNT = 'aztec.tx_collector.txs_from_mempool_count';
 export const TX_PROVIDER_TXS_FROM_P2P_COUNT = 'aztec.tx_collector.txs_from_p2p_count';
 export const TX_PROVIDER_MISSING_TXS_COUNT = 'aztec.tx_collector.missing_txs_count';
+export const TX_PROVIDER_P2P_TXS_REQUESTED_FRACTION = 'aztec.tx_collector.txs_requested_fraction';
+export const TX_PROVIDER_P2P_TXS_REQUEST_DELAY = 'aztec.tx_collector.txs_requested_delay';
 
 export const TX_COLLECTOR_COUNT = 'aztec.tx_collector.tx_count';
 export const TX_COLLECTOR_DURATION_PER_REQUEST = 'aztec.tx_collector.duration_per_request';

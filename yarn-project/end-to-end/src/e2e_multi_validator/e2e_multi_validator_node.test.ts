@@ -8,12 +8,11 @@ import type { Logger } from '@aztec/aztec.js/log';
 import type { AztecNode } from '@aztec/aztec.js/node';
 import type { Wallet } from '@aztec/aztec.js/wallet';
 import type { CheatCodes } from '@aztec/aztec/testing';
-import {
-  type DeployL1ContractsReturnType,
-  RollupContract,
-  createExtendedL1Client,
-  getL1ContractsConfigEnvVars,
-} from '@aztec/ethereum';
+import { createExtendedL1Client } from '@aztec/ethereum/client';
+import { getL1ContractsConfigEnvVars } from '@aztec/ethereum/config';
+import { RollupContract } from '@aztec/ethereum/contracts';
+import type { DeployAztecL1ContractsReturnType } from '@aztec/ethereum/deploy-aztec-l1-contracts';
+import { EpochNumber } from '@aztec/foundation/branded-types';
 import { SecretValue } from '@aztec/foundation/config';
 import { Signature } from '@aztec/foundation/eth-signature';
 import { retryUntil } from '@aztec/foundation/retry';
@@ -39,7 +38,7 @@ describe('e2e_multi_validator_node', () => {
   let aztecNode: AztecNode;
   let config: AztecNodeConfig;
   let logger: Logger;
-  let deployL1ContractsValues: DeployL1ContractsReturnType;
+  let deployL1ContractsValues: DeployAztecL1ContractsReturnType;
   let rollup: RollupContract;
   let cheatCodes: CheatCodes;
   const artifact = StatefulTestContractArtifact;
@@ -83,7 +82,7 @@ describe('e2e_multi_validator_node', () => {
       publisherPrivateKeys: publisherPrivateKeys.map(k => new SecretValue(k)),
       minTxsPerBlock: 1,
       archiverPollingIntervalMS: 200,
-      transactionPollingIntervalMS: 200,
+      sequencerPollingIntervalMS: 200,
       worldStateBlockCheckIntervalMS: 200,
       blockCheckIntervalMS: 200,
       startProverNode: true,
@@ -129,7 +128,7 @@ describe('e2e_multi_validator_node', () => {
     });
     expect(tx.blockNumber).toBeDefined();
 
-    const dataStore = ((aztecNode as AztecNodeService).getBlockSource() as Archiver).dataStore;
+    const dataStore = (aztecNode as AztecNodeService).getBlockSource() as Archiver;
     const [block] = await dataStore.getPublishedBlocks(tx.blockNumber!, tx.blockNumber!);
     const payload = ConsensusPayload.fromBlock(block.block);
     const attestations = block.attestations
@@ -163,7 +162,11 @@ describe('e2e_multi_validator_node', () => {
       validatorAddresses[VALIDATOR_COUNT - 2],
     ]);
 
-    await cheatCodes.rollup.advanceToEpoch((await cheatCodes.rollup.getEpoch()) + BigInt(config.lagInEpochs + 1));
+    await cheatCodes.rollup.advanceToEpoch(
+      EpochNumber.fromBigInt(
+        BigInt(await cheatCodes.rollup.getEpoch()) + BigInt(config.lagInEpochsForValidatorSet + 1),
+      ),
+    );
 
     // check that the committee is undefined
     const committee = await rollup.getCurrentEpochCommittee();
@@ -188,7 +191,7 @@ describe('e2e_multi_validator_node', () => {
     });
     expect(tx.blockNumber).toBeDefined();
 
-    const dataStore = ((aztecNode as AztecNodeService).getBlockSource() as Archiver).dataStore;
+    const dataStore = (aztecNode as AztecNodeService).getBlockSource() as Archiver;
     const [block] = await dataStore.getPublishedBlocks(tx.blockNumber!, tx.blockNumber!);
     const payload = ConsensusPayload.fromBlock(block.block);
     const attestations = block.attestations

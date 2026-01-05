@@ -180,10 +180,8 @@ set(BARRETENBERG_TARGET_OBJECTS
     $<TARGET_OBJECTS:stdlib_blake2s_objects>
     $<TARGET_OBJECTS:stdlib_blake3s_objects>
     $<TARGET_OBJECTS:stdlib_circuit_builders_objects>
-    $<TARGET_OBJECTS:stdlib_chonk_verifier_objects>
     $<TARGET_OBJECTS:stdlib_eccvm_verifier_objects>
     $<TARGET_OBJECTS:stdlib_honk_verifier_objects>
-    $<TARGET_OBJECTS:stdlib_goblin_verifier_objects>
     $<TARGET_OBJECTS:stdlib_keccak_objects>
     $<TARGET_OBJECTS:stdlib_poseidon2_objects>
     $<TARGET_OBJECTS:stdlib_primitives_objects>
@@ -216,7 +214,8 @@ if(WASM)
         barretenberg-debug.wasm
         ${BARRETENBERG_TARGET_OBJECTS}
         $<TARGET_OBJECTS:wasi_objects>
-        $<TARGET_OBJECTS:vm2_stub_objects>
+        # This is an object library, so doesn't need _objects.
+        $<TARGET_OBJECTS:vm2_stub>
     )
 
     target_link_options(

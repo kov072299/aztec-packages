@@ -4,8 +4,7 @@ import {
   NUMBER_OF_L1_L2_MESSAGES_PER_ROLLUP,
   STATE_REFERENCE_LENGTH,
 } from '@aztec/constants';
-import type { ViemStateReference } from '@aztec/ethereum';
-import type { Fr } from '@aztec/foundation/fields';
+import type { Fr } from '@aztec/foundation/curves/bn254';
 import { BufferReader, FieldReader, serializeToBuffer } from '@aztec/foundation/serialize';
 import type { FieldsOf } from '@aztec/foundation/types';
 
@@ -76,26 +75,12 @@ export class StateReference {
     return new StateReference(l1ToL2MessageTree, partial);
   }
 
-  static fromViem(stateReference: ViemStateReference) {
-    return new StateReference(
-      AppendOnlyTreeSnapshot.fromViem(stateReference.l1ToL2MessageTree),
-      PartialStateReference.fromViem(stateReference.partialStateReference),
-    );
-  }
-
   static empty(): StateReference {
     return new StateReference(AppendOnlyTreeSnapshot.empty(), PartialStateReference.empty());
   }
 
   static random(): StateReference {
     return new StateReference(AppendOnlyTreeSnapshot.random(), PartialStateReference.random());
-  }
-
-  toViem(): ViemStateReference {
-    return {
-      l1ToL2MessageTree: this.l1ToL2MessageTree.toViem(),
-      partialStateReference: this.partial.toViem(),
-    };
   }
 
   toAbi(): [ReturnType<AppendOnlyTreeSnapshot['toAbi']>, ReturnType<PartialStateReference['toAbi']>] {

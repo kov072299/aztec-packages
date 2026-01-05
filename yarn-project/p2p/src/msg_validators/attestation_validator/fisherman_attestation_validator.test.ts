@@ -1,6 +1,7 @@
 import type { EpochCache } from '@aztec/epoch-cache';
-import { Secp256k1Signer } from '@aztec/foundation/crypto';
-import { Fr } from '@aztec/foundation/fields';
+import { SlotNumber } from '@aztec/foundation/branded-types';
+import { Secp256k1Signer } from '@aztec/foundation/crypto/secp256k1-signer';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import { BlockProposal, ConsensusPayload, PeerErrorSeverity } from '@aztec/stdlib/p2p';
 import { makeBlockAttestation, makeBlockProposal, makeL2BlockHeader } from '@aztec/stdlib/testing';
 import { getTelemetryClient } from '@aztec/telemetry-client';
@@ -39,8 +40,8 @@ describe('FishermanAttestationValidator', () => {
       epochCache.getProposerAttesterAddressInCurrentOrNextSlot.mockResolvedValue({
         currentProposer: proposer.address,
         nextProposer: proposer.address,
-        currentSlot: 98n,
-        nextSlot: 99n,
+        currentSlot: SlotNumber(98),
+        nextSlot: SlotNumber(99),
       });
       epochCache.isInCommittee.mockResolvedValue(true);
 
@@ -61,8 +62,8 @@ describe('FishermanAttestationValidator', () => {
       epochCache.getProposerAttesterAddressInCurrentOrNextSlot.mockResolvedValue({
         currentProposer: proposer.address,
         nextProposer: proposer.address,
-        currentSlot: 100n,
-        nextSlot: 101n,
+        currentSlot: SlotNumber(100),
+        nextSlot: SlotNumber(101),
       });
       epochCache.isInCommittee.mockResolvedValue(false);
 
@@ -84,8 +85,8 @@ describe('FishermanAttestationValidator', () => {
       epochCache.getProposerAttesterAddressInCurrentOrNextSlot.mockResolvedValue({
         currentProposer: proposer.address,
         nextProposer: proposer.address,
-        currentSlot: 100n,
-        nextSlot: 101n,
+        currentSlot: SlotNumber(100),
+        nextSlot: SlotNumber(101),
       });
       epochCache.isInCommittee.mockResolvedValue(true);
 
@@ -103,8 +104,8 @@ describe('FishermanAttestationValidator', () => {
       epochCache.getProposerAttesterAddressInCurrentOrNextSlot.mockResolvedValue({
         currentProposer: proposer.address,
         nextProposer: proposer.address,
-        currentSlot: 100n,
-        nextSlot: 101n,
+        currentSlot: SlotNumber(100),
+        nextSlot: SlotNumber(101),
       });
       epochCache.isInCommittee.mockResolvedValue(true);
     });
@@ -190,7 +191,6 @@ describe('FishermanAttestationValidator', () => {
       const differentPayload = new ConsensusPayload(
         header.toCheckpointHeader(),
         Fr.random(), // Different archive
-        mockAttestation.payload.stateReference,
       );
       const mockProposal = new BlockProposal(differentPayload, mockAttestation.proposerSignature, []);
 
@@ -230,8 +230,8 @@ describe('FishermanAttestationValidator', () => {
       epochCache.getProposerAttesterAddressInCurrentOrNextSlot.mockResolvedValue({
         currentProposer: proposer.address,
         nextProposer: proposer.address,
-        currentSlot: 100n,
-        nextSlot: 101n,
+        currentSlot: SlotNumber(100),
+        nextSlot: SlotNumber(101),
       });
       epochCache.isInCommittee.mockResolvedValue(true);
     });

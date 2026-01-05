@@ -5,7 +5,8 @@ import type {
   NESTED_RECURSIVE_PROOF_LENGTH,
   NESTED_RECURSIVE_ROLLUP_HONK_PROOF_LENGTH,
 } from '@aztec/constants';
-import type { Fr } from '@aztec/foundation/fields';
+import { BlockNumber, EpochNumber } from '@aztec/foundation/branded-types';
+import type { Fr } from '@aztec/foundation/curves/bn254';
 import type { Tuple } from '@aztec/foundation/serialize';
 import { type TreeNodeLocation, UnbalancedTreeStore } from '@aztec/foundation/trees';
 import type { PublicInputsAndRecursiveProof } from '@aztec/stdlib/interfaces/server';
@@ -66,7 +67,7 @@ export class EpochProvingState {
   >();
 
   constructor(
-    public readonly epochNumber: number,
+    public readonly epochNumber: EpochNumber,
     public readonly totalNumCheckpoints: number,
     private readonly finalBlobBatchingChallenges: FinalBlobBatchingChallenges,
     private onCheckpointBlobAccumulatorSet: (checkpoint: CheckpointProvingState) => void,
@@ -125,13 +126,16 @@ export class EpochProvingState {
     return this.checkpoints[index];
   }
 
-  public getCheckpointProvingStateByBlockNumber(blockNumber: number) {
+  public getCheckpointProvingStateByBlockNumber(blockNumber: BlockNumber) {
     return this.checkpoints.find(
-      c => c && blockNumber >= c.firstBlockNumber && blockNumber < c.firstBlockNumber + c.totalNumBlocks,
+      c =>
+        c &&
+        Number(blockNumber) >= Number(c.firstBlockNumber) &&
+        Number(blockNumber) < Number(c.firstBlockNumber) + c.totalNumBlocks,
     );
   }
 
-  public getBlockProvingStateByBlockNumber(blockNumber: number) {
+  public getBlockProvingStateByBlockNumber(blockNumber: BlockNumber) {
     return this.getCheckpointProvingStateByBlockNumber(blockNumber)?.getBlockProvingStateByBlockNumber(blockNumber);
   }
 

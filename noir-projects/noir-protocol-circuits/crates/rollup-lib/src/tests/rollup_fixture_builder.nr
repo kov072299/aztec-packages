@@ -1,8 +1,9 @@
-use crate::abis::{BlockRollupPublicInputs, CheckpointRollupPublicInputs, TxRollupPublicInputs};
+use crate::abis::{
+    BlockRollupPublicInputs, CheckpointRollupPublicInputs, ParityPublicInputs, TxRollupPublicInputs,
+};
 use bigcurve::BigCurve;
 use bignum::BigNum;
 use blob::abis::{BlobAccumulator, BLSPoint, FinalBlobBatchingChallenges};
-use parity_lib::ParityPublicInputs;
 use types::{
     abis::{
         append_only_tree_snapshot::AppendOnlyTreeSnapshot, block_constant_data::BlockConstantData,
@@ -21,9 +22,12 @@ use types::{
     },
     hash::poseidon2_hash,
     merkle_tree::calculate_empty_tree_root,
-    proof::proof_data::ProofData,
+    proof::proof_data::{AvmV2ProofData, ProofData},
     tests::{
-        fixtures::{proof_data::make_proof_data, vk_tree::vk_tree_root},
+        fixtures::{
+            proof_data::{make_proof_data, make_proof_data_for_fixed_vk},
+            vk_tree::vk_tree_root,
+        },
         merkle_tree_utils::SingleSubtreeMerkleTree,
         utils::make_fixture,
     },
@@ -67,6 +71,10 @@ impl RollupFixtureBuilder {
         vk_index: u32,
     ) -> ProofData<T, ProofLen, VkLen> {
         make_proof_data(public_inputs, vk_index)
+    }
+
+    pub fn make_avm_proof_data<T>(public_inputs: T) -> AvmV2ProofData<T> {
+        make_proof_data_for_fixed_vk(public_inputs, 42)
     }
 
     pub fn build_archive_tree(

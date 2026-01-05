@@ -1,10 +1,22 @@
-import { ArchiverStoreHelper, KVArchiverDataStore, type PublishedL2Block } from '@aztec/archiver';
+import { ArchiverStoreHelper, KVArchiverDataStore } from '@aztec/archiver';
 import { GENESIS_ARCHIVE_ROOT } from '@aztec/constants';
+import { BlockNumber, CheckpointNumber, EpochNumber, SlotNumber } from '@aztec/foundation/branded-types';
+import { Fr } from '@aztec/foundation/curves/bn254';
 import type { EthAddress } from '@aztec/foundation/eth-address';
-import { Fr } from '@aztec/foundation/fields';
+import { isDefined } from '@aztec/foundation/types';
 import type { AztecAsyncKVStore } from '@aztec/kv-store';
 import type { AztecAddress } from '@aztec/stdlib/aztec-address';
-import type { L2Block, L2BlockSource, L2Tips, ValidateBlockResult } from '@aztec/stdlib/block';
+import {
+  CommitteeAttestation,
+  L2Block,
+  type L2BlockId,
+  type L2BlockNew,
+  type L2BlockSource,
+  type L2Tips,
+  PublishedL2Block,
+  type ValidateBlockResult,
+} from '@aztec/stdlib/block';
+import { Checkpoint, PublishedCheckpoint } from '@aztec/stdlib/checkpoint';
 import type { ContractInstanceWithAddress } from '@aztec/stdlib/contract';
 import type { L1RollupConstants } from '@aztec/stdlib/epoch-helpers';
 import type { BlockHeader } from '@aztec/stdlib/tx';
@@ -18,11 +30,28 @@ export class TXEArchiver extends ArchiverStoreHelper implements L2BlockSource {
     super(new KVArchiverDataStore(db, 9999));
   }
 
-  public override async addBlocks(blocks: PublishedL2Block[]): Promise<boolean> {
-    const opResults = await Promise.all([
-      this.store.addLogs(blocks.map(block => block.block)),
-      this.store.addBlocks(blocks),
-    ]);
+  public async getBlock(number: BlockNumber): Promise<L2Block | undefined> {
+    if (number === 0) {
+      return undefined;
+    }
+    const publishedBlocks = await this.getPublishedBlocks(number, 1);
+    if (publishedBlocks.length === 0) {
+      return undefined;
+    }
+    return publishedBlocks[0].block;
+  }
+
+  public async getBlocks(from: BlockNumber, limit: number, proven?: boolean): Promise<L2Block[]> {
+    const publishedBlocks = await this.getPublishedBlocks(from, limit, proven);
+    return publishedBlocks.map(x => x.block);
+  }
+
+  public override async addCheckpoints(
+    checkpoints: PublishedCheckpoint[],
+    _result?: ValidateBlockResult,
+  ): Promise<boolean> {
+    const allBlocks = checkpoints.flatMap(ch => ch.checkpoint.blocks);
+    const opResults = await Promise.all([this.store.addLogs(allBlocks), this.store.addCheckpoints(checkpoints)]);
 
     return opResults.every(Boolean);
   }
@@ -31,16 +60,16 @@ export class TXEArchiver extends ArchiverStoreHelper implements L2BlockSource {
    * Gets the number of the latest L2 block processed by the block source implementation.
    * @returns The number of the latest L2 block processed by the block source implementation.
    */
-  public getBlockNumber(): Promise<number> {
-    return this.store.getSynchedL2BlockNumber();
+  public getBlockNumber(): Promise<BlockNumber> {
+    return this.store.getLatestBlockNumber();
   }
 
   /**
    * Gets the number of the latest L2 block proven seen by the block source implementation.
    * @returns The number of the latest L2 block proven seen by the block source implementation.
    */
-  public getProvenBlockNumber(): Promise<number> {
-    return this.store.getSynchedL2BlockNumber();
+  public override getProvenBlockNumber(): Promise<BlockNumber> {
+    return this.store.getProvenBlockNumber();
   }
 
   /**
@@ -48,16 +77,55 @@ export class TXEArchiver extends ArchiverStoreHelper implements L2BlockSource {
    * @param number - The block number to return (inclusive).
    * @returns The requested L2 block.
    */
-  public override async getPublishedBlock(number: number): Promise<PublishedL2Block | undefined> {
+  public async getPublishedBlock(number: number): Promise<PublishedL2Block | undefined> {
     // If the number provided is -ve, then return the latest block.
     if (number < 0) {
-      number = await this.store.getSynchedL2BlockNumber();
+      number = await this.store.getLatestBlockNumber();
     }
     if (number == 0) {
       return undefined;
     }
-    const blocks = await this.store.getPublishedBlocks(number, 1);
-    return blocks.length === 0 ? undefined : blocks[0];
+    const publishedBlocks = await this.retrievePublishedBlocks(BlockNumber(number), 1);
+    return publishedBlocks.length === 0 ? undefined : publishedBlocks[0];
+  }
+
+  getPublishedBlocks(from: BlockNumber, limit: number, proven?: boolean): Promise<PublishedL2Block[]> {
+    return this.retrievePublishedBlocks(from, limit, proven);
+  }
+
+  private async retrievePublishedBlocks(
+    from: BlockNumber,
+    limit: number,
+    proven?: boolean,
+  ): Promise<PublishedL2Block[]> {
+    const checkpoints = await this.store.getRangeOfCheckpoints(CheckpointNumber(from), limit);
+    const provenCheckpointNumber = await this.store.getProvenCheckpointNumber();
+    const blocks = (
+      await Promise.all(checkpoints.map(ch => this.store.getBlocksForCheckpoint(ch.checkpointNumber)))
+    ).filter(isDefined);
+
+    const olbBlocks: PublishedL2Block[] = [];
+    for (let i = 0; i < checkpoints.length; i++) {
+      const blockForCheckpoint = blocks[i][0];
+      const checkpoint = checkpoints[i];
+      if (proven === true && checkpoint.checkpointNumber > provenCheckpointNumber) {
+        continue;
+      }
+      const oldCheckpoint = new Checkpoint(
+        blockForCheckpoint.archive,
+        checkpoint.header,
+        [blockForCheckpoint],
+        checkpoint.checkpointNumber,
+      );
+      const oldBlock = L2Block.fromCheckpoint(oldCheckpoint);
+      const publishedBlock = new PublishedL2Block(
+        oldBlock,
+        checkpoint.l1,
+        checkpoint.attestations.map(x => CommitteeAttestation.fromBuffer(x)),
+      );
+      olbBlocks.push(publishedBlock);
+    }
+    return olbBlocks;
   }
 
   /**
@@ -65,8 +133,20 @@ export class TXEArchiver extends ArchiverStoreHelper implements L2BlockSource {
    * @param number - The block number to return (inclusive).
    * @returns The requested L2 block.
    */
-  public getBlock(number: number | 'latest'): Promise<L2Block | undefined> {
-    return this.getPublishedBlock(number != 'latest' ? number : -1).then(block => block?.block);
+  public getL2Block(number: BlockNumber | 'latest'): Promise<L2Block | undefined> {
+    return this.getPublishedBlock(number != 'latest' ? number : -1).then(b => b?.block);
+  }
+
+  /**
+   * Gets an L2 block (new format).
+   * @param number - The block number to return.
+   * @returns The requested L2 block.
+   */
+  public getL2BlockNew(number: BlockNumber): Promise<L2BlockNew | undefined> {
+    if (number === 0) {
+      return Promise.resolve(undefined);
+    }
+    return this.store.getBlock(number);
   }
 
   /**
@@ -76,41 +156,66 @@ export class TXEArchiver extends ArchiverStoreHelper implements L2BlockSource {
    */
   public async getBlockHeader(number: number | 'latest'): Promise<BlockHeader | undefined> {
     if (number === 'latest') {
-      number = await this.store.getSynchedL2BlockNumber();
+      number = await this.store.getLatestBlockNumber();
     }
     if (number === 0) {
       return undefined;
     }
-    const headers = await this.store.getBlockHeaders(number, 1);
+    const headers = await this.store.getBlockHeaders(BlockNumber(number), 1);
     return headers.length === 0 ? undefined : headers[0];
   }
 
-  public getBlocks(from: number, limit: number, _proven?: boolean): Promise<L2Block[]> {
-    return this.getPublishedBlocks(from, limit).then(blocks => blocks.map(b => b.block));
+  public getBlockRange(from: number, limit: number, _proven?: boolean): Promise<L2Block[]> {
+    return this.getPublishedBlocks(BlockNumber(from), limit).then(blocks => blocks.map(b => b.block));
   }
 
-  public getL2SlotNumber(): Promise<bigint> {
+  public getPublishedCheckpoints(_from: CheckpointNumber, _limit: number): Promise<PublishedCheckpoint[]> {
+    throw new Error('TXE Archiver does not implement "getPublishedCheckpoints"');
+  }
+
+  public getCheckpointByArchive(_archive: Fr): Promise<Checkpoint | undefined> {
+    throw new Error('TXE Archiver does not implement "getCheckpointByArchive"');
+  }
+
+  public getL2SlotNumber(): Promise<SlotNumber | undefined> {
     throw new Error('TXE Archiver does not implement "getL2SlotNumber"');
   }
 
-  public getL2EpochNumber(): Promise<bigint> {
+  public getL2EpochNumber(): Promise<EpochNumber> {
     throw new Error('TXE Archiver does not implement "getL2EpochNumber"');
   }
 
-  public getBlocksForEpoch(_epochNumber: bigint): Promise<L2Block[]> {
+  public getCheckpointsForEpoch(_epochNumber: EpochNumber): Promise<Checkpoint[]> {
+    throw new Error('TXE Archiver does not implement "getCheckpointsForEpoch"');
+  }
+
+  public getBlocksForEpoch(_epochNumber: EpochNumber): Promise<L2Block[]> {
     throw new Error('TXE Archiver does not implement "getBlocksForEpoch"');
   }
 
-  public getBlockHeadersForEpoch(_epochNumber: bigint): Promise<BlockHeader[]> {
+  public getBlockHeadersForEpoch(_epochNumber: EpochNumber): Promise<BlockHeader[]> {
     throw new Error('TXE Archiver does not implement "getBlockHeadersForEpoch"');
   }
 
-  public isEpochComplete(_epochNumber: bigint): Promise<boolean> {
+  public isEpochComplete(_epochNumber: EpochNumber): Promise<boolean> {
     throw new Error('TXE Archiver does not implement "isEpochComplete"');
   }
 
-  public getL2Tips(): Promise<L2Tips> {
-    throw new Error('TXE Archiver does not implement "getL2Tips"');
+  public async getL2Tips(): Promise<L2Tips> {
+    // In TXE there is no possibility of reorgs and no blocks are ever getting proven so we just set 'latest', 'proven'
+    // and 'finalized' to the latest block.
+    const blockHeader = await this.getBlockHeader('latest');
+    if (!blockHeader) {
+      throw new Error('L2Tips requested from TXE Archiver but no block header found');
+    }
+
+    const number = blockHeader.globalVariables.blockNumber;
+    const hash = (await blockHeader.hash()).toString();
+    return {
+      latest: { number, hash } as L2BlockId,
+      proven: { number, hash } as L2BlockId,
+      finalized: { number, hash } as L2BlockId,
+    };
   }
 
   public getL1Constants(): Promise<L1RollupConstants> {
@@ -147,5 +252,12 @@ export class TXEArchiver extends ArchiverStoreHelper implements L2BlockSource {
 
   public override getPendingChainValidationStatus(): Promise<ValidateBlockResult> {
     return Promise.resolve({ valid: true });
+  }
+
+  getPublishedBlockByHash(_blockHash: Fr): Promise<PublishedL2Block | undefined> {
+    throw new Error('Method not implemented.');
+  }
+  getPublishedBlockByArchive(_archive: Fr): Promise<PublishedL2Block | undefined> {
+    throw new Error('Method not implemented.');
   }
 }

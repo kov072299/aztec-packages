@@ -1,3 +1,4 @@
+import { BlockNumber } from '@aztec/foundation/branded-types';
 import { createLogger } from '@aztec/foundation/log';
 import type { DataStoreConfig } from '@aztec/kv-store/config';
 import { createStore } from '@aztec/kv-store/lmdb-v2';
@@ -27,7 +28,7 @@ export async function createArchiverStore(
 /**
  * Creates a local archiver.
  * @param config - The archiver configuration.
- * @param blobSinkClient - The blob sink client.
+ * @param blobClient - The blob client client.
  * @param opts - The options.
  * @param telemetry - The telemetry client.
  * @returns The local archiver.
@@ -59,7 +60,7 @@ async function registerProtocolContracts(store: KVArchiverDataStore) {
 
     await store.registerContractFunctionSignatures(publicFunctionSignatures);
     const bytecodeCommitment = await computePublicBytecodeCommitment(contractClassPublic.packedBytecode);
-    await store.addContractClasses([contractClassPublic], [bytecodeCommitment], blockNumber);
-    await store.addContractInstances([contract.instance], blockNumber);
+    await store.addContractClasses([contractClassPublic], [bytecodeCommitment], BlockNumber(blockNumber));
+    await store.addContractInstances([contract.instance], BlockNumber(blockNumber));
   }
 }

@@ -18,7 +18,9 @@ library TestConstants {
   uint256 internal constant AZTEC_SLOT_DURATION = 36;
   uint256 internal constant AZTEC_EPOCH_DURATION = 32;
   uint256 internal constant AZTEC_TARGET_COMMITTEE_SIZE = 48;
-  uint256 internal constant AZTEC_LAG_IN_EPOCHS = 2;
+  uint256 internal constant AZTEC_LAG_IN_EPOCHS_FOR_VALIDATOR_SET = 3;
+  uint256 internal constant AZTEC_LAG_IN_EPOCHS_FOR_RANDAO = 2;
+  uint256 internal constant AZTEC_INBOX_LAG = 2;
   uint256 internal constant AZTEC_PROOF_SUBMISSION_EPOCHS = 1;
   uint256 internal constant AZTEC_SLASHING_QUORUM = 6;
   uint256 internal constant AZTEC_SLASHING_ROUND_SIZE = 10;
@@ -78,7 +80,7 @@ library TestConstants {
       rewardDistributor: IRewardDistributor(address(0)),
       sequencerBps: Bps.wrap(5000),
       booster: IBoosterCore(address(0)), // Will cause a deployment
-      blockReward: 50e18
+      checkpointReward: 50e18
     });
   }
 
@@ -98,7 +100,8 @@ library TestConstants {
       aztecEpochDuration: AZTEC_EPOCH_DURATION,
       aztecProofSubmissionEpochs: AZTEC_PROOF_SUBMISSION_EPOCHS,
       targetCommitteeSize: AZTEC_TARGET_COMMITTEE_SIZE,
-      lagInEpochs: AZTEC_LAG_IN_EPOCHS,
+      lagInEpochsForValidatorSet: AZTEC_LAG_IN_EPOCHS_FOR_VALIDATOR_SET,
+      lagInEpochsForRandao: AZTEC_LAG_IN_EPOCHS_FOR_RANDAO,
       slashingQuorum: AZTEC_SLASHING_QUORUM,
       slashingRoundSize: AZTEC_SLASHING_ROUND_SIZE,
       slashingLifetimeInRounds: AZTEC_SLASHING_LIFETIME_IN_ROUNDS,
@@ -116,7 +119,8 @@ library TestConstants {
       slashAmounts: [AZTEC_SLASH_AMOUNT_SMALL, AZTEC_SLASH_AMOUNT_MEDIUM, AZTEC_SLASH_AMOUNT_LARGE],
       slasherFlavor: SlasherFlavor.EMPIRE,
       localEjectionThreshold: 0, // The same as it being off, and only using the global.
-      earliestRewardsClaimableTimestamp: Timestamp.wrap(0) // Default to 0 (no restriction)
+      earliestRewardsClaimableTimestamp: Timestamp.wrap(0), // Default to 0 (no restriction)
+      inboxLag: AZTEC_INBOX_LAG
     });
 
     // For the version we derive it based on the config (with a 0 version)
